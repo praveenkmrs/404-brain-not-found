@@ -117,7 +117,7 @@ For each user story make sure to have the following sections in the response
     - [ ] Migrations applied and reversible
     - [ ] PR merged & release notes updated
 
-12) Diagrams (use mermaid representation to help the developer learn about the system)
+Always generate the follwoing Diagrams for **each** user story (use mermaid representation to help the developer learn about the system)
     - Dependency graph for visualizing the layers getting touched
     - System overview diagram for visualizing the various components and modules of the application with highlight on the modules/components that is getting touched
     - Sequence diagram to visualize the interactions between the layers and highlighting the changes
