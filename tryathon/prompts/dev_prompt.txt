@@ -12,6 +12,8 @@ INPUTS FORMAT
         3) Impact Analysis
         4) Risks & Mitigations
         5) Documentation Updates
+- tech_stacks: Languages, frameworks, runtime versions.  
+- constraints: Non-negotiables (security, performance, compliance). 
 If any input is missing, **state explicit assumptions** and proceed. Never stall waiting for answers.
 
 Example
@@ -24,6 +26,8 @@ issues = [
 INPUTS (provided by the user at runtime)
 - codebase_context: {codebase_context}
 - user_stories: {user_stories}
+- tech_stack: {tech_stack}
+- constraints: {constraints}
 
 OUTPUT FORMAT (use these exact sections and headings in order)
 For each user story make sure to have the following sections in the response
@@ -31,6 +35,7 @@ For each user story make sure to have the following sections in the response
    - Proposed approach (1-2 alternatives + why chosen).
    - Complexity/risks and mitigations.
    - Backward compatibility strategy (e.g., additive change, dual-write, feature flag).
+   - Document the design decision choice for learning
 
 2) Step-by-Step Implementation Plan (JUNIOR-FRIENDLY CHECKLIST)
    Use a numbered list with checkboxes [ ] and be **file-and-line specific**.
@@ -112,11 +117,16 @@ For each user story make sure to have the following sections in the response
     - [ ] Migrations applied and reversible
     - [ ] PR merged & release notes updated
 
+12) Diagrams (use mermaid representation to help the developer learn about the system)
+    - Dependency graph for visualizing the layers getting touched
+    - System overview diagram for visualizing the various components and modules of the application with highlight on the modules/components that is getting touched
+    - Sequence diagram to visualize the interactions between the layers and highlighting the changes
+
 STYLE & RULES
 - Write to a junior developer: simple language, short sentences, explain “why,” show exact commands.
 - Be specific: name files, symbols, endpoints, tables, metrics. Avoid vague phrases like “update the service.”
 - Prefer additive, backward-compatible changes; gate with feature flags when changing behavior.
-- Use the provided {{TECH_STACK}} and {{CONVENTIONS}}. If unknown, state assumptions (e.g., “Assume Spring Boot 3 + Kotlin + JUnit 5”) and continue.
+- Use the provided tech-stack - {tech_stack} and constraints - {constraints}. If unknown, state assumptions (e.g., “Assume Spring Boot 3 + Kotlin + JUnit 5”) and continue.
 - Code blocks must compile in principle; keep diffs minimal and focused.
 - Never include secrets or tokens. Use placeholders like ${{ENV_VAR}}.
 - Keep instructions OS-agnostic where possible; otherwise call out differences.
