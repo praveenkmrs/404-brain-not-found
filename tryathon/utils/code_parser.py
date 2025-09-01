@@ -1,9 +1,7 @@
 from logging import config
 from repomix import RepoProcessor, RepomixConfig
-from dotenv import load_dotenv
 import os
-
-load_dotenv()
+import shutil
 
 ## REPOMIX documentation - https://github.com/AndersonBY/python-repomix
 def _repomix_config(codebase_path) -> RepomixConfig:
@@ -11,10 +9,9 @@ def _repomix_config(codebase_path) -> RepomixConfig:
     
     # Output settings
     output_path = os.getenv("PARSE_OUTPUT_PATH", "output")
-    if not os.path.exists(output_path):
-        os.makedirs(output_path)
-    else:
-        os.removedirs(output_path)
+    if os.path.exists(output_path):
+        shutil.rmtree(output_path)  # Clear the output directory if it exists
+    os.makedirs(output_path, exist_ok=True)
 
     if codebase_path and codebase_path.startswith("https://"):
         repo_name = codebase_path.split("/")[-1].replace(".git", "")
@@ -72,3 +69,4 @@ def parse_remote_codebase(repo_url: str | None, branch: str = "main"):
     else:
         print("No valid remote codebase found.")
         return None
+    

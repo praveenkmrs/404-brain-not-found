@@ -1,9 +1,5 @@
 import requests
 from dataclasses import dataclass
-from dotenv import load_dotenv
-import os
-
-load_dotenv()
 
 # ['url',
 #  'repository_url',
@@ -46,8 +42,7 @@ class GitHubIssue:
     created_at: str
     updated_at: str
 
-def get_issues(owner:str, repo:str):
-    token = os.getenv("GITHUB_TOKEN") 
+def get_issues(owner:str, repo:str, token: str):
     url = f"https://api.github.com/repos/{owner}/{repo}/issues"
     headers = {"Authorization": f"token {token}"}
 

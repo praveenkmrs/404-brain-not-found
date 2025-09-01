@@ -1,7 +1,7 @@
 from pathlib import Path
 
 def load_prompt_from_file(prompt_file: str) -> str:
-    prompt_path = Path(__file__)/prompt_file
+    prompt_path = Path(__file__).parent/prompt_file
     try:
         with open(prompt_path, 'r', encoding='utf-8') as f:
             return f.read()
