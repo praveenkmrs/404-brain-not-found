@@ -1,0 +1,253 @@
+'User story: 1
+
+1) Story Title  
+Enable Customers to Create and Manage Custom Shopping Lists
+
+2) Story Recap  
+Currently, customers are restricted to a single shopping cart and cannot create named shopping or wish lists. There is no way for customers to organize items they want to purchase later or for specific use cases. This means shopping is less flexible and customers may forget products they want to buy in the future.
+
+3) Business Context & Rationale  
+Being able to save products to custom shopping lists or wish lists is a standard feature in modern online stores. It allows users to plan future purchases, organize items by occasion or preference, and improves return visits to the site. This boosts retention and customer satisfaction, supporting business goals like higher conversion and average order value.
+
+Who benefits:
+- Customers (end-users): Improved shopping convenience, can plan and organize purchases
+- Business: Higher engagement and likelihood of return business
+
+4) Scope of Work  
+IN SCOPE:
+- Support for customers to create, update, and delete multiple custom shopping lists with user-defined names.
+- Customers can add or remove products from any shopping list they own.
+- Ability to view all the products in a given shopping list.
+- Shopping list products should persist even after checkout (unless deleted by the user).
+
+OUT OF SCOPE:
+- Sharing of lists with other users.
+- Collaborative or public lists.
+- Automatic import of lists from other platforms.
+- Integration into checkout flow beyond adding list items to the cart.
+
+5) Technical Context (for junior devs)  
+Affected Modules:
+- Likely new collection/db model for shopping lists (distinct from cart).
+- Expose API endpoints like `/api/shopping-lists` for CRUD operations (create, read, update, delete).
+- Updates to DTOs/entities: Ecommerce domain has Cart, will now need ShoppingList and ShoppingListItem.
+- Authentication/authorization: Users must only access and modify their own lists.
+- Impact on frontend (if applicable): New UI for list management.
+
+Constraints:
+- Must not negatively impact cart performance or security.
+- Must align with existing user model and maintainability standards.
+
+6) Acceptance Criteria  
+- GIVEN a logged-in user  
+  WHEN they request to create a new shopping list with a custom name  
+  THEN a new list is created and visible in their account.
+
+- GIVEN a user with at least one shopping list  
+  WHEN they add a product to a selected list  
+  THEN the product appears in that list.
+
+- GIVEN a user with a shopping list  
+  WHEN they remove a product from the list  
+  THEN the product no longer appears in that list.
+
+- GIVEN a user with multiple shopping lists  
+  WHEN they view their lists  
+  THEN all lists (including names and contained products) are shown.
+
+- GIVEN a user with a shopping list  
+  WHEN they delete the list  
+  THEN the list and all its items are removed from their account (does not affect cart).
+
+- GIVEN any user  
+  WHEN they try to access or modify a shopping list they do not own  
+  THEN access is denied.
+
+7) Definition of Done (checklist)  
+- [ ] Shopping list entity and storage implemented.
+- [ ] Secure, RESTful API endpoints for shopping list management (CRUD, item add/remove).
+- [ ] Unit and integration tests covering all new logic.
+- [ ] Logging covers key actions (creation, deletion, unauthorized access).
+- [ ] Documentation explains feature usage for frontend/backend devs.
+- [ ] Security (auth checks) enforced for all endpoints.
+- [ ] Code reviewed and merged as per team standards.
+
+8) Assumptions & Open Questions  
+Assumptions:
+- Each shopping list is specific to and owned by a single user.
+- Shopping lists are not visible or accessible to other users by default.
+- Products in lists are snapshots referencing current catalog details, not preserved at the time of adding.
+Open Questions:
+- Should shopping list items have optional notes or quantities (like a cart), or just product IDs?
+- Should there be a default “Wishlist” for each new user?
+
+9) Dependencies & Risks  
+Dependencies:
+- Relies on existing User and Product entities.
+- May require new DB migrations or schema changes.
+Risks:
+- Data model complexity could increase if not kept simple.
+- Unauthorized access if ownership checks are missed.
+Mitigation:
+- Ensure thorough code reviews and add tests for permission boundaries.
+
+
+---
+
+User story: 2
+
+1) Story Title  
+Allow Customers to Stash (Save for Later) Items from Their Shopping Cart
+
+2) Story Recap  
+Customers currently have no way to temporarily remove items from their active cart while keeping them for future consideration. Shoppers often want to “save for later” items they are interested in but don’t want to purchase immediately, without deleting them entirely.
+
+3) Business Context & Rationale  
+A “Save for Later” or “Stash” function is a common UX feature that helps reduce basket abandonment and increases the likelihood of future sales. By letting customers move items out of their cart but keep them one click away from restoration, we support more flexible, user-friendly purchase flows.
+
+Who benefits:
+- Customers who want to delay buying some items but not lose them
+- Business via increased likelihood of future orders (retargeting, reduced friction)
+
+4) Scope of Work  
+IN SCOPE:
+- Ability for users to move individual items from cart to a special “stashed” or “saved for later” zone.
+- Users can move items back from stash to cart.
+- Items in stash do not appear in checkout flow or count in the active cart’s total.
+- The stashed items persist for the user (tied to their account).
+
+OUT OF SCOPE:
+- Recommendations or reminders for stashed items.
+- Bulk movement of all cart items to stash.
+
+5) Technical Context (for junior devs)  
+Affected Modules:
+- Update to Cart entity: Either add a \'stashed\' flag to cart items or introduce a separate data structure for stashed items tied to a user.
+- API endpoints to move items between cart and stash.
+- UI changes to support save for later/stash feature (if applicable).
+- Update DTOs to account for stashed state.
+
+Constraints & Related Issues:
+- Stashed items do not block inventory for actual purchases.
+- Security: Users cannot stash unrelated users\' items.
+- Maintainability: Avoid over-complication of cart logic.
+
+6) Acceptance Criteria  
+- GIVEN a user with items in their cart  
+  WHEN they select to \'stash\' an item  
+  THEN that item is removed from the cart and appears in their stash, and is not present in the cart totals.
+
+- GIVEN a user with items in their stash  
+  WHEN they choose to return an item to cart  
+  THEN the item is removed from stash and appears in the active cart.
+
+- GIVEN a user with cart and stash items  
+  WHEN they proceed to checkout  
+  THEN only the cart items are included in the order.
+
+- GIVEN a user  
+  WHEN they log in again after a session expires  
+  THEN their stash items are still available.
+
+7) Definition of Done (checklist)  
+- [ ] Backend data model supports “stashed” or “saved for later” state.
+- [ ] API endpoints for moving items between cart and stash.
+- [ ] Unit/integration tests for edge cases (double-moves, invalid moves, etc).
+- [ ] Secure ownership enforced.
+- [ ] Documentation updated to reflect stash workflow.
+- [ ] Logging for stash operations.
+- [ ] Peer review and code merged.
+
+8) Assumptions & Open Questions  
+Assumptions:
+- Stash is user-specific and not public/shareable.
+- Moving items to stash should not track price history or availability changes (they’ll be checked again on move-back).
+Open Questions:
+- Should there be a limit on stashed items?
+- Is there any automatic cleanup after some inactivity period?
+
+9) Dependencies & Risks  
+Dependencies:
+- User authentication and cart logic.
+Risks:
+- Potential confusion if UI distinctions are not clear.
+Mitigation:
+- Make stash separate from wishlists (from Story 1), and document clearly.
+
+
+---
+
+User story: 3
+
+1) Story Title  
+Provide Clear Option for Customers to Empty Their Shopping Cart
+
+2) Story Recap  
+Customers currently have no simple way to remove all items from the cart at once. They need to remove products individually, which is time-consuming and frustrating, especially if they wish to start over.
+
+3) Business Context & Rationale  
+A “Clear Cart” button saves user time and improves the shopping experience. It reduces friction for customers who want to start over, helping avoid abandoned carts caused by frustration.
+
+Who benefits:
+- End users seeking a fresh start on their order.
+- Customer support (fewer complaints about cart management).
+
+4) Scope of Work  
+IN SCOPE:
+- Backend support for clearing all cart items in a single action.
+- Expose endpoint (e.g., `DELETE /api/cart/items` or custom `/api/cart/clear`).
+- Cart status properly updated and empty state reflected.
+- UI (if applicable) can trigger this API.
+
+OUT OF SCOPE:
+- Undo/restore after clearing cart.
+- "Clear cart" for stashed/saved items (unless also requested).
+
+5) Technical Context (for junior devs)  
+Affected Modules:
+- Cart entity: Use `.clear()` method (already supported in Cart.java).
+- CartController and CartService: Add a `clearCart` API endpoint for current user.
+- Tests to verify cart is empty and state updates as expected.
+
+Constraints:
+- Must only clear the logged-in user\'s cart.
+- Should not affect stashed, wishlist, or past orders.
+
+6) Acceptance Criteria  
+- GIVEN a user with multiple items in their cart  
+  WHEN they choose to clear the cart  
+  THEN all items are removed from their cart and cart total is reset.
+
+- GIVEN a user with an empty cart  
+  WHEN they attempt to clear their cart  
+  THEN no error occurs, and the cart is confirmed as empty.
+
+- GIVEN any user  
+  WHEN they attempt to clear another user’s cart  
+  THEN they are denied access.
+
+7) Definition of Done (checklist)  
+- [ ] CartService and CartController support clear cart endpoint.
+- [ ] State and totals update immediately on cart clear.
+- [ ] Unit/integration tests for normal and edge cases.
+- [ ] Secure access (user can only clear own cart).
+- [ ] Documentation and OpenAPI/Swagger updated.
+- [ ] Logging of cart clear actions for auditing.
+- [ ] Code reviewed and merged.
+
+8) Assumptions & Open Questions  
+Assumptions:
+- Cart clear does not permanently delete the cart itself, just removes all items.
+Open Questions:
+- Should we support a confirmation step for clear cart (UI concern, but FYI for API).
+- Should we track when/why users clear their carts (analytics)?
+
+9) Dependencies & Risks  
+Dependencies:
+- Cart entity/model and user authentication.
+Risks:
+- If access checks are missed, one user might clear another’s cart.
+Mitigation:
+- Strict auth validation and ownership in CartController.  
+
+---'

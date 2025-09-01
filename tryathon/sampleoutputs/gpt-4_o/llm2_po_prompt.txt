@@ -1,0 +1,132 @@
+"User story: 001
+
+1) Story Title  
+   - Implement Custom Shopping List Feature
+
+2) Story Recap  
+   - As a customer, I want to create separate shopping lists for easier organization and future purchases. Currently, I lack the ability to manage items under custom lists, which would streamline the shopping experience.
+
+3) Business Context & Rationale  
+   - This feature is needed to enhance user personalization and convenience, allowing customers to organize their shopping items and improve continuation of purchases. It directly benefits users by simplifying repeated or future purchases through maintaining organized lists.
+
+4) Scope of Work  
+   - **In Scope:** Implementing functionality for creating, naming, and managing custom shopping lists within the application.
+   - **Out of Scope:** Advanced features such as sharing lists with other users, copying items between lists, or auto-suggest features.
+
+5) Technical Context (for junior devs)  
+   - Likely impacted modules include `CartController`, `CartService`, and potentially creating new data structures or DTOs for storing shopping lists.
+   - Constraints involve ensuring data security for user lists and maintaining scalability for large numbers of lists.
+
+6) Acceptance Criteria  
+   - GIVEN a logged-in user  
+   - WHEN they opt to create a new shopping list  
+   - THEN they can enter a name and create the list successfully.
+
+   - GIVEN a user with multiple shopping lists  
+   - WHEN they view their shopping lists  
+   - THEN each list displays the items they've added, with options to modify or delete lists.
+
+7) Definition of Done (checklist)  
+   - Code merged and reviewed.
+   - Unit/integration tests written and passing.
+   - Logging/monitoring updated for list creation and management actions.
+   - Documentation updated to include new shopping list feature details.
+   - Feature flagging or backward-compatibility handled if applicable.
+
+8) Assumptions & Open Questions  
+   - Assumption: A user can own multiple shopping lists.
+   - Open Question: Are there limits on the number of lists a user can create?
+
+9) Dependencies & Risks  
+   - Risk of performance issues if lists are not efficiently managed. Consider using indexing strategies in MongoDB.
+   - Dependencies on existing cart functionality to integrate list operations smoothly.
+
+---
+
+User story: 002
+
+1) Story Title  
+   - Implement the Ability to Stash Shopping Cart Items for Later
+
+2) Story Recap  
+   - Customers want to save current shopping cart items for future use or later transactions but lack functionality to move items to a 'save for later' stash within the shopping cart.
+
+3) Business Context & Rationale  
+   - This feature allows users to separate immediate purchases from items they are interested in buying later, enhancing user experience and purchase flexibility. It aligns with modern shopping app standards, contributing to increased sales retention.
+
+4) Scope of Work  
+   - **In Scope:** Enabling a 'save-for-later' option for items in the shopping cart, including UI elements and backend changes to support the feature.
+   - **Out of Scope:** Recommendations or reminders based on stashed items.
+
+5) Technical Context (for junior devs)  
+   - Impacted files likely include `CartController`, `CartService`, and relevant cart DTOs for representing stashed items.
+   - Needs to ensure high performance when accessing or moving items between cart and stash.
+
+6) Acceptance Criteria  
+   - GIVEN a user with items in the shopping cart  
+   - WHEN they choose to stash an item  
+   - THEN the item is moved to a 'save-for-later' stash effectively.
+
+   - GIVEN a user with stashed items  
+   - WHEN they opt to review their stash  
+   - THEN they see all saved items with the option to move them back to the main cart.
+
+7) Definition of Done (checklist)  
+   - Code merged and reviewed.
+   - Unit/integration tests written and passing.
+   - Logging/monitoring updated for stash actions.
+   - Documentation updated regarding new stash functionalities.
+   - Feature flagging or backward-compatibility handled if applicable.
+
+8) Assumptions & Open Questions  
+   - Assumption: A single stash holds all saved items for a user.
+   - Open Question: How should stashed items be displayed in comparison to regular cart items?
+
+9) Dependencies & Risks  
+   - Potential database performance impact due to stashing operations. Optimize stash data retrieval.
+   - Dependency on cart module adjustments to reflect stash state efficiently.
+
+---
+
+User story: 003
+
+1) Story Title  
+   - Implement Shopping Cart Clearing Functionality
+
+2) Story Recap  
+   - Customers can add items to their shopping cart but currently have no straightforward method to empty the cart and start fresh.
+
+3) Business Context & Rationale  
+   - Offering users the ability to clear their shopping cart minimizes friction when they change their purchasing strategy, ensuring seamless transitions between different shopping sessions.
+
+4) Scope of Work  
+   - **In Scope:** Add functionality for users to completely clear their shopping cart contents.
+   - **Out of Scope:** Undo functionality for clearing the cart (e.g., 'restore' cart).
+
+5) Technical Context (for junior devs)  
+   - Impacted areas include `CartController`, `CartService`, and interactions with the MongoDB database to facilitate cart clearing.
+   - Ensure compliance with performance and security constraints when deleting data.
+
+6) Acceptance Criteria  
+   - GIVEN a user with items in their cart  
+   - WHEN they opt to clear their cart  
+   - THEN all items are removed without error or data retention.
+
+   - GIVEN an empty shopping cart  
+   - WHEN a user tries to view cart contents  
+   - THEN a message is shown that indicates the cart is empty.
+
+7) Definition of Done (checklist)  
+   - Code merged and reviewed.
+   - Unit/integration tests written and passing.
+   - Logging/monitoring updated for item clearance actions.
+   - Documentation updated to cover new clearing capabilities.
+   - Feature flagging or backward-compatibility handled if applicable.
+
+8) Assumptions & Open Questions  
+   - Assumption: Cart clearance is a single atomic operation with no side effects.
+   - Open Question: Should cart clearing trigger a user notification?
+
+9) Dependencies & Risks  
+   - Risk of accidental data loss for users; ensure confirmation steps are in place.
+   - Dependency on existing cart CRUD operations for implementing cart clearance smoothly."

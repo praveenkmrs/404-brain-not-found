@@ -1,0 +1,645 @@
+'### User Story 001: Implement Custom Shopping List Feature
+
+#### 1) Design Outline
+
+- **Proposed Approach:** 
+  - Implement a new `ShoppingList` entity to store a list of items associated with a user. Update `CartController` and `CartService` to manage shopping lists. Create new DTOs for handling shopping list data.
+  - **Chosen Approach:** Separate shopping list handling from cart management for better modularity and scalability.
+- **Complexity/Risks and Mitigations:** 
+  - Risk of database performance degradation with large numbers of lists. Use indexing on user IDs.
+  - Complexity in maintaining backward compatibility is minimal as this feature is additive.
+- **Backward Compatibility Strategy:** 
+  - Additive change. No modifications to existing cart functionalities.
+- **Design Decision Choice:** 
+  - The separation of lists from carts maintains existing cart logic while introducing new functionalities, complying with scalability and maintainability objectives.
+
+#### 2) Step-by-Step Implementation Plan
+
+##### 2.1 Pre-work
+
+- [ ] Create a new branch named `feature/custom-shopping-lists`.
+- [ ] Sync the repo, build using `mvn clean install`, and run tests locally.
+
+##### 2.2 Code Changes
+
+**Path: `src/main/java/pk/ai/shopping_cart/entity/ShoppingList.java`**
+
+- Change Summary: Create a new entity `ShoppingList`.
+- Skeleton:
+
+```java
+package pk.ai.shopping_cart.entity;
+
+import org.springframework.data.annotation.Id;
+import org.springframework.data.mongodb.core.mapping.Document;
+import lombok.Data;
+import java.util.List;
+
+@Data
+@Document(collection = "shoppingLists")
+public class ShoppingList {
+    @Id
+    private String id;
+    private String userId;
+    private String name;
+    private List<CartItem> items;
+}
+```
+
+**Path: `src/main/java/pk/ai/shopping_cart/repository/ShoppingListRepository.java`**
+
+- Change Summary: Create a repository for `ShoppingList`.
+- Skeleton:
+
+```java
+package pk.ai.shopping_cart.repository;
+
+import pk.ai.shopping_cart.entity.ShoppingList;
+import org.springframework.data.mongodb.repository.MongoRepository;
+import org.springframework.stereotype.Repository;
+import java.util.List;
+
+@Repository
+public interface ShoppingListRepository extends MongoRepository<ShoppingList, String> {
+    List<ShoppingList> findByUserId(String userId);
+}
+```
+
+**Path: `src/main/java/pk/ai/shopping_cart/controller/ShoppingListController.java`**
+
+- Change Summary: Add REST endpoints to manage shopping lists.
+- Diff Example:
+```diff
+@RestController
+@RequestMapping("/api/shopping-lists")
+@Slf4j
+public class ShoppingListController {
+
+    @Autowired
+    private ShoppingListService shoppingListService;
+
+    @PostMapping("/create")
+    public ResponseEntity<ShoppingListResponse> createShoppingList(@RequestParam String userId, @RequestParam String name) {
+        ShoppingListResponse response = shoppingListService.createShoppingList(userId, name);
+        return ResponseEntity.ok(response);
+    }
+
+    @GetMapping
+    public ResponseEntity<List<ShoppingListResponse>> getUserShoppingLists(@RequestParam String userId) {
+        List<ShoppingListResponse> response = shoppingListService.getUserShoppingLists(userId);
+        return ResponseEntity.ok(response);
+    }
+}
+```
+
+**Path: `src/main/java/pk/ai/shopping_cart/service/ShoppingListService.java`**
+
+- Change Summary: Implement service logic for creating and retrieving shopping lists.
+- Diff Example:
+```java
+package pk.ai.shopping_cart.service;
+
+import pk.ai.shopping_cart.entity.ShoppingList;
+import pk.ai.shopping_cart.repository.ShoppingListRepository;
+import pk.ai.shopping_cart.dto.shoppinglist.ShoppingListResponse;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+@Service
+public class ShoppingListService {
+    @Autowired
+    private ShoppingListRepository shoppingListRepository;
+
+    public ShoppingListResponse createShoppingList(String userId, String name) {
+        ShoppingList shoppingList = new ShoppingList();
+        shoppingList.setUserId(userId);
+        shoppingList.setName(name);
+        ShoppingList savedList = shoppingListRepository.save(shoppingList);
+        return new ShoppingListResponse(savedList);
+    }
+
+    public List<ShoppingListResponse> getUserShoppingLists(String userId) {
+        List<ShoppingList> shoppingLists = shoppingListRepository.findByUserId(userId);
+        return shoppingLists.stream().map(ShoppingListResponse::new).collect(Collectors.toList());
+    }
+}
+```
+
+**Path: `src/main/java/pk/ai/shopping_cart/dto/shoppinglist/ShoppingListResponse.java`**
+
+- Change Summary: Create a DTO for shopping list responses.
+- Skeleton:
+
+```java
+package pk.ai.shopping_cart.dto.shoppinglist;
+
+import lombok.Data;
+import pk.ai.shopping_cart.entity.ShoppingList;
+
+@Data
+public class ShoppingListResponse {
+    private String id;
+    private String userId;
+    private String name;
+
+    public ShoppingListResponse(ShoppingList shoppingList) {
+        this.id = shoppingList.getId();
+        this.userId = shoppingList.getUserId();
+        this.name = shoppingList.getName();
+    }
+}
+```
+
+##### 2.3 Config & Secrets
+
+- No changes to env vars or config files needed.
+
+##### 2.4 Data & Migrations
+
+- [ ] Forward migration:
+  - No schema changes as MongoDB is schemaless.
+- [ ] Index on `ShoppingList` collection via annotations for `userId`.
+
+##### 2.5 Feature Flags / Kill Switch
+
+- [ ] Introduce feature flag `customShoppingListsEnabled` in application properties for selective enabling.
+
+##### 2.6 Observability
+
+- [ ] Logs:
+  - Create logs for list creation and retrieval with DEBUG/INFO levels showcasing list details.
+- [ ] Metrics:
+  - Track the number of lists created, list retrieval time.
+
+##### 2.7 Performance & Resilience
+
+- [ ] Ensure retrieval times for lists are within acceptable latency limits (e.g., ~500ms for moderate list size).
+  
+##### 2.8 Security & Compliance
+
+- [ ] Ensure proper authentication for accessing the shopping list endpoints.
+- [ ] Validate the `userId` against authenticated sessions.
+
+#### 3) Testing Plan
+
+- **Unit Tests:**
+  - `ShoppingListServiceTest#createShoppingList_shouldCreateList`
+  - `ShoppingListServiceTest#getUserShoppingLists_shouldReturnLists`
+  - GIVEN valid inputs, WHEN creating/getting lists THEN service should work without errors.
+- **Integration Tests:**
+  - Confirm endpoint access and retrieval with expected payloads using Spring Boot Test.
+  
+#### 4) Manual Verification Checklist
+
+- Use Postman/curl to test new endpoints:
+  - `POST /api/shopping-lists/create?userId={userId}&name={name}`
+  - `GET /api/shopping-lists?userId={userId}`
+- Look for expected JSON responses and verify log outputs.
+
+#### 5) CI/CD & DevOps
+
+- Add automated integration tests for ShoppingList endpoints.
+  
+#### 6) Rollback & Recovery
+
+- Add logic in the service to gracefully handle any failures during list manipulation, ensuring no residual objects.
+
+#### 7) Risks & Mitigations
+
+- **Database Overload:** Optimize index usage.
+- **Authentication Errors:** Confirm endpoint access via security configurations.
+
+#### 8) Pull Request Plan
+
+- **Title:** Implement Custom Shopping List Feature
+- **Description:** Added shopping list functionalities for user organization, refactored controllers/services.
+- **Reviewers:** Suggest mentorship review for `ShoppingListService.java` and `ShoppingListController.java`.
+
+#### 9) Commit Strategy
+
+1. `Add ShoppingList entity and repository`
+2. `Implement ShoppingList service logic`
+3. `Create ShoppingList controller endpoints`
+4. `Add DTO for ShoppingListResponse`
+5. `Add unit and integration tests for ShoppingList`
+
+#### 10) Documentation Updates
+
+- Update README with new API endpoints.
+- Add a section on personalization options in user guides.
+
+#### 11) Definition of Done
+
+- [ ] Acceptance criteria validated through tests.
+- [ ] Flags documented.
+- [ ] Logs and telemetry added.
+- [ ] PR reviews and documentation updates completed.
+
+#### Diagrams
+
+**Dependency graph:**
+```mermaid
+graph TD;
+    A[CartService] --> B[CartController]
+    B --> C[ShoppingListService]
+    C --> D[ShoppingListRepository]
+```
+
+**System overview diagram:**
+```mermaid
+flowchart LR
+    subgraph Backend
+        CartService --> CartController --> ShoppingListService
+        ShoppingListService --> ShoppingListController
+    end
+    subgraph MongoDB
+        ShoppingListCollection --> CartCollection
+    end
+    Backend --> MongoDB
+```
+
+**Sequence diagram:**
+```mermaid
+sequenceDiagram
+    participant User
+    participant ShoppingListController
+    participant ShoppingListService
+    participant ShoppingListRepository
+    User->>ShoppingListController: Create Shopping List
+    ShoppingListController->>ShoppingListService: createShoppingList()
+    ShoppingListService->>ShoppingListRepository: Save ShoppingList
+    ShoppingListRepository-->>ShoppingListService: Saved ShoppingList
+    ShoppingListService-->>ShoppingListController: ShoppingListResponse
+    ShoppingListController-->>User: List Created
+```
+
+### User Story 002: Implement the Ability to Stash Shopping Cart Items for Later
+
+#### 1) Design Outline
+
+- **Proposed Approach:** 
+  - Allow users to move items from their cart to a stash for later use. Introduce a new `Stash` section within the existing `Cart` entity to hold stashed items.
+  - **Chosen Approach:** Modify `Cart` entity to include stashed item functionality, leveraging existing cart infrastructure for seamless integration.
+- **Complexity/Risks and Mitigations:** 
+  - Risk of performance impacts due to added item movements. Optimize stash operations and indexing.
+  - Minimal backward compatibility complexity due to additive nature of changes.
+- **Backward Compatibility Strategy:** 
+  - Extend existing cart operations; should not degrade existing cart usage.
+- **Design Decision Choice:** 
+  - An extension of the `Cart` keeps items under the same transactional context, simplifying stash operations.
+
+#### 2) Step-by-Step Implementation Plan
+
+##### 2.1 Pre-work
+
+- [ ] Create a new branch named `feature/stash-cart-items`.
+- [ ] Sync the repo, build using `mvn clean install`, and run tests locally.
+
+##### 2.2 Code Changes
+
+**Path: `src/main/java/pk/ai/shopping_cart/entity/Cart.java`**
+
+- Change Summary: Add a new list field in `Cart` to hold stashed items.
+- Diff:
+```diff
+@@ -28,6 +28,7 @@ public class Cart {
+ @Builder.Default
+ private List<CartItem> items = new ArrayList<>();
++@Builder.Default
++private List<CartItem> stashedItems = new ArrayList<>();
+```
+
+**Path: `src/main/java/pk/ai/shopping_cart/controller/CartController.java`**
+
+- Change Summary: Add endpoints for stashing items.
+- Diff Example:
+```diff
++@PutMapping("/items/{productId}/stash")
++public ResponseEntity<CartResponse> stashItem(
++    @RequestParam String userId,
++    @PathVariable String productId) {
++    log.debug("Stashing item {} for user: {}", productId, userId);
++    CartResponse cart = cartService.stashItem(userId, productId);
++    return ResponseEntity.ok(cart);
++}
++
++@GetMapping("/stash")
++public ResponseEntity<List<CartItemResponse>> getStashedItems(@RequestParam String userId) {
++    log.debug("Getting stashed items for user: {}", userId);
++    List<CartItemResponse> stash = cartService.getStashedItems(userId);
++    return ResponseEntity.ok(stash);
++}
+```
+
+**Path: `src/main/java/pk/ai/shopping_cart/service/CartService.java`**
+
+- Change Summary: Implement logic to move items between cart and stash.
+- Diff Example:
+```java
+public CartResponse stashItem(String userId, String productId) {
+    Cart cart = cartRepository.findActiveCartByUserId(userId)
+        .orElseThrow(() -> new RuntimeException("Cart not found for user: " + userId));
+
+    Optional<CartItem> item = cart.findItemByProductId(productId);
+    if (item.isPresent()) {
+        cart.getStashedItems().add(item.get());
+        cart.removeItem(productId);
+        cart = cartRepository.save(cart);
+    } else {
+        throw new RuntimeException("Product not found in cart: " + productId);
+    }
+
+    return convertToCartResponse(cart);
+}
+
+public List<CartItemResponse> getStashedItems(String userId) {
+    Cart cart = cartRepository.findActiveCartByUserId(userId)
+        .orElseThrow(() -> new RuntimeException("Cart not found for user: " + userId));
+    
+    return cart.getStashedItems().stream().map(this::convertToCartItemResponse).collect(Collectors.toList());
+}
+```
+
+##### 2.3 Config & Secrets
+
+- No changes to env vars or config files needed.
+
+##### 2.4 Data & Migrations
+
+- [ ] Forward migration:
+  - New field is part of `Cart` entity; no explicit migration as MongoDB handles dynamic schema changes.
+- [ ] Ensure appropriate indexing and distribution strategy updated for performance.
+
+##### 2.5 Feature Flags / Kill Switch
+
+- [ ] Feature flag `stashFunctionalityEnabled` added for selective rollout.
+
+##### 2.6 Observability
+
+- [ ] Logs:
+  - Log stashing operations with INFO for basic operations, DEBUG for detailed flows.
+- [ ] Metrics:
+  - Gather metrics on stash operation times and counts.
+
+##### 2.7 Performance & Resilience
+
+- [ ] Monitor stash retrieval times; ensure they fall within expected thresholds.
+
+##### 2.8 Security & Compliance
+
+- [ ] Confirm stashing operations comply with authenticated sessions.
+
+#### 3) Testing Plan
+
+- **Unit Tests:**
+  - `CartServiceTest#stashItem_shouldMoveItemToStash`
+  - `CartServiceTest#getStashedItems_shouldReturnStashContent`
+  - GIVEN valid cart items, WHEN stashing THEN the item must be stored separately.
+- **Integration Tests:**
+  - Verify stashing endpoints with Spring Boot tests using dependencies setup.
+  
+#### 4) Manual Verification Checklist
+
+- Verify using Postman/curl:
+  - `PUT /api/cart/items/{productId}/stash?userId={userId}`
+  - `GET /api/cart/stash?userId={userId}`
+- Validate stashed items show the expected JSON payload.
+
+#### 5) CI/CD & DevOps
+
+- Ensure deployment pipelines support stash functionality, incorporating integration test results.
+
+#### 6) Rollback & Recovery
+
+- Rollback support handled by default save operations; no additional setup needed.
+
+#### 7) Risks & Mitigations
+
+- **Performance:** Monitor MongoDB queries for stashed items, optimize indexing.
+- **User Complexity:** Ensure UI elements are intuitive.
+
+#### 8) Pull Request Plan
+
+- **Title:** Implement Ability to Stash Shopping Cart Items
+- **Description:** Added functionality to move cart items to stash, updated cart service logic.
+- **Reviewers:** Suggested review for `CartService.java` changes.
+
+#### 9) Commit Strategy
+
+1. `Add stash functionality field to Cart`
+2. `Implement service methods for item stashing`
+3. `Create API endpoints to handle stashing`
+4. `Update tests for stash operations`
+
+#### 10) Documentation Updates
+
+- Update API documentation to reflect new stash endpoints and usage examples.
+
+#### 11) Definition of Done
+
+- [ ] Acceptance criteria validated via tests and manual checks.
+- [ ] Feature flag properly configured.
+- [ ] Service scalable and performant post-changes.
+
+#### Diagrams
+
+**Dependency graph:**
+```mermaid
+graph TD;
+    A[CartService] --> B[CartController]
+    B --> C[CartItem]
+    C --> D[Cart]
+```
+
+**System overview diagram:**
+```mermaid
+flowchart LR
+    subgraph Backend
+        CartService --> CartController --> StashOperations
+    end
+    Cart --> CartItems --> StashedItems
+    Backend --> MongoDB
+```
+
+**Sequence diagram:**
+```mermaid
+sequenceDiagram
+    participant User
+    participant CartController
+    participant CartService
+    participant CartRepository
+    User->>CartController: Stash Item
+    CartController->>CartService: stashItem()
+    CartService->>CartRepository: Save Modified Cart
+    CartRepository-->>CartService: Cart Saved
+    CartService-->>CartController: CartResponse
+    CartController-->>User: Item Stashed
+```
+
+### User Story 003: Implement Shopping Cart Clearing Functionality
+
+#### 1) Design Outline
+
+- **Proposed Approach:** 
+  - Extend cart operations in `CartService` to include a method for clearing all items from a cart. Expose this functionality via `CartController`.
+  - **Chosen Approach:** Simple extension within existing methods in `Cart`, leveraging existing transactional context.
+- **Complexity/Risks and Mitigations:** 
+  - Risk of accidental data loss mitigated by requiring user confirmation for clearance.
+  - Backward compatibility ensured by maintaining existing cart functionality intact.
+- **Backward Compatibility Strategy:** 
+  - Keep changes additive in nature; Cart operations stay unchanged except for added method.
+- **Design Decision Choice:** 
+  - Simple service and controller update enables cart clearing without disrupting existing user experience.
+
+#### 2) Step-by-Step Implementation Plan
+
+##### 2.1 Pre-work
+
+- [ ] Create a new branch named `feature/clear-cart`.
+- [ ] Sync the repo, build using `mvn clean install`, and run tests locally.
+
+##### 2.2 Code Changes
+
+**Path: `src/main/java/pk/ai/shopping_cart/controller/CartController.java`**
+
+- Change Summary: Add endpoint for clearing cart.
+- Diff Example:
+```diff
+@PostMapping("/clear")
+public ResponseEntity<CartResponse> clearCart(@RequestParam String userId) {
+    log.debug("Clearing cart for user: {}", userId);
+    CartResponse cart = cartService.clearCart(userId);
+    return ResponseEntity.ok(cart);
+}
+```
+
+**Path: `src/main/java/pk/ai/shopping_cart/service/CartService.java`**
+
+- Change Summary: Implement cart clearing logic.
+- Diff Example:
+```java
+public CartResponse clearCart(String userId) {
+    Cart cart = cartRepository.findActiveCartByUserId(userId)
+        .orElseThrow(() -> new RuntimeException("Cart not found for user: " + userId));
+
+    cart.clear();
+    cart.setExpiresAt(LocalDateTime.now().plusDays(EXPIRATION_PERIOD_DAYS));
+    cart = cartRepository.save(cart);
+
+    return convertToCartResponse(cart);
+}
+```
+
+##### 2.3 Config & Secrets
+
+- No changes to env vars or config files needed.
+
+##### 2.4 Data & Migrations
+
+- No database migrations required; existing dynamic nature of Cart entity used.
+
+##### 2.5 Feature Flags / Kill Switch
+
+- [ ] Consider feature flag `cartClearingEnabled` to control rollout.
+
+##### 2.6 Observability
+
+- [ ] Logs:
+  - DEBUG level logs for clear operations.
+- [ ] Metrics:
+  - Number of cart clear operations, average time taken for clear operations.
+
+##### 2.7 Performance & Resilience
+
+- [ ] Ensure clear operations do not degrade system performance.
+
+##### 2.8 Security & Compliance
+
+- [ ] Confirmation dialog/UI must precede actual clear operation to prevent unintended actions.
+
+#### 3) Testing Plan
+
+- **Unit Tests:**
+  - `CartServiceTest#clearCart_shouldRemoveAllItems`
+  - `CartServiceTest#cartIsEmptyAfterClear`
+  - GIVEN items in cart, WHEN clearing THEN all must be removed.
+- **Integration Tests:**
+  - Validate endpoint for clearing cart with Spring Boot tests.
+  
+#### 4) Manual Verification Checklist
+
+- Verify using Postman/curl:
+  - `POST /api/cart/clear?userId={userId}`
+- Validate cart is empty post-clearance.
+
+#### 5) CI/CD & DevOps
+
+- Confirm pipeline supports new clear functionality tests.
+
+#### 6) Rollback & Recovery
+
+- Implement user confirmations for cart clearance; rollback mechanisms cover unintended clears.
+
+#### 7) Risks & Mitigations
+
+- **Data Loss:** Confirmation steps before executing clearance.
+- **Scalability:** Ensure cart operations do not interfere with database performance.
+
+#### 8) Pull Request Plan
+
+- **Title:** Implement Shopping Cart Clearing Functionality
+- **Description:** Allow users to clear their cart contents; implemented service and endpoint logic.
+- **Reviewers:** Ensure Cart-related logic is reviewed thoroughly.
+
+#### 9) Commit Strategy
+
+1. `Add cart clearing endpoint`
+2. `Implement Cart service methods for clearing`
+3. `Update cart-related tests for clearing`
+4. `Documentation updates for cart operations`
+
+#### 10) Documentation Updates
+
+- Update API documentation with clear endpoint information and expected responses.
+
+#### 11) Definition of Done
+
+- [ ] Cart clearance validated via manual and automated tests.
+- [ ] Documentation reflects new cart operations.
+- [ ] Feature flag implemented if needed.
+
+#### Diagrams
+
+**Dependency graph:**
+```mermaid
+graph TD;
+    A[CartService] --> B[CartController]
+    B --> C[Cart]
+```
+
+**System overview diagram:**
+```mermaid
+flowchart LR
+    subgraph Backend
+        CartService --> CartController --> ClearOperations
+    end
+    Cart --> CartItems
+    Backend --> MongoDB
+```
+
+**Sequence diagram:**
+```mermaid
+sequenceDiagram
+    participant User
+    participant CartController
+    participant CartService
+    participant CartRepository
+    User->>CartController: Clear Cart
+    CartController->>CartService: clearCart()
+    CartService->>CartRepository: Save Cleared Cart
+    CartRepository-->>CartService: Cart Cleared
+    CartService-->>CartController: CartResponse
+    CartController-->>User: Cart Cleared
+```  
+
+This detailed plan covers each user story provided, addressing key components and implementations needed for successful integration, testing, and deployment within the codebase. Each change is designed to be additive, maintaining compatibility and performance standards.'
