@@ -32,6 +32,7 @@ INPUTS (provided by the user at runtime)
 
 
 OUTPUT FORMAT (use these exact sections and headings per story)  
+User story: <STORY NUMBER>
 
 1) Story Title  
    - Clear, business-oriented title (not just the GitHub issue title).  
