@@ -1,234 +1,262 @@
-User story: 1
-    Story Title
-        Customers can create and manage multiple shopping lists (wishlists) and purchase from them
-    Story Recap
-        Customers want to organize items they intend to buy into named shopping lists (for example “Back-to-school,” “Home office,” or “Holiday gifts”). Today, our app only has a single active cart. There is no way to create separate lists to plan and later move items into the cart to check out.
-    Business Context & Rationale
-        Why: Shopping lists increase engagement and conversion by letting customers plan purchases over time, share or revisit lists, and quickly add selected items to the cart when ready.
-        Who benefits: End customers (organization and convenience), the business (more frequent return visits, higher conversion, higher AOV).
-    Outcome: Users can create, read, update, delete (CRUD) shopping lists, add/remove items, and move items from lists into the cart.
-    Scope of Work
-        In scope:
-            Create a new “Shopping List” domain separate from the cart.
-            CRUD operations for lists: create list (name required), rename list, delete list, list all lists for the current user.
-            Add/remove/update quantity of items within a list.
-            Move/copy items from a list to the active cart (partial or full quantity).
-            Return list metadata (name, created/updated timestamps, item count) and item snapshots (name, price at time added, SKU, image, currency, etc.).
-            Handle product availability changes gracefully (e.g., indicate unavailable or out-of-stock in list responses).
-            MongoDB indexing for userId and list status, basic validation.
-            API endpoints secured like other business endpoints (authenticated).
-        Out of scope:
-            Sharing lists with other users or via public links.
-            Real-time synchronization across devices beyond our existing HTTP APIs.
-            Price-tracking or notifications when list items change in price or stock.
-            Technical Context (for junior devs)
-    New modules to add:
-        entity: ShoppingList, ShoppingListItem
-        repository: ShoppingListRepository (Mongo)
-        service: ShoppingListService (business logic)
-        controller: ShoppingListController (REST API under /api/lists)
-        dto/list: ListRequest, ListResponse, ListItemRequest, ListItemResponse
-        Existing modules impacted:
-        CartService (to support “move from list to cart”)
-        ProductRepository/ProductService (to validate product existence and optionally availability on move-to-cart)
-        SecurityConfiguration (no change to rules, new endpoints must be authenticated)
-        Data model guidance (align to existing patterns):
-        Mirror Cart/CartItem design for item snapshots: productId, sku, name, unitPrice, currency, quantity, imageUrl, addedAt, updatedAt.
-        Status enum for lists (ACTIVE, ARCHIVED).
-        Indexed fields in Mongo: userId, status.
-    Constraints:
-        Security: endpoints require authentication per current SecurityConfiguration (JWT filter assumed in place); continue accepting userId via request param until user context extraction is standardized.
-        Performance & scalability: indexed queries by userId; avoid N+1 lookups by snapshotting item fields; validate product availability lazily on move-to-cart rather than on every list read.
-        Maintainability: follow DTO patterns used in Cart/Product; log at debug/info as in existing services; add unit and integration tests.
-    Acceptance Criteria (use Gherkin-style where possible)
-        AC1: Create a shopping list (covers “No option to create custom shopping list”)
-            GIVEN an authenticated user
-            WHEN they POST /api/lists with a valid name
-            THEN a new list is created with status ACTIVE and returned with id, name, createdAt, updatedAt, and itemCount=0.
-        AC2: List my shopping lists
-            GIVEN an authenticated user with at least one list
-            WHEN they GET /api/lists
-            THEN the API returns only that user’s lists with metadata and item counts.
-        AC3: Rename a list
-            GIVEN an authenticated user and an existing list
-            WHEN they PATCH /api/lists/{listId} with a new valid name
-            THEN the list name is updated and updatedAt is refreshed.
-        AC4: Delete a list
-            GIVEN an authenticated user and an existing list
-            WHEN they DELETE /api/lists/{listId}
-            THEN the list and its items are removed and the API returns 204 No Content.
-        AC5: Add an item to a list
-            GIVEN an authenticated user and an existing list
-            WHEN they POST /api/lists/{listId}/items with productId and quantity > 0
-            THEN the item is added (or quantity incremented if the product already exists in the list) and the list is returned with updated items and counts.
-        AC6: Update list item quantity
-            GIVEN an authenticated user and a list containing a product
-            WHEN they PUT /api/lists/{listId}/items with productId and a new positive quantity
-            THEN the item’s quantity is updated and timestamps refreshed.
-        AC7: Remove item from list
-            GIVEN an authenticated user and a list containing a product
-            WHEN they DELETE /api/lists/{listId}/items/{productId}
-            THEN the product is removed from the list and the updated list is returned.
-        AC8: Move items from list to cart
-            GIVEN an authenticated user, a list, and valid items in that list
-            WHEN they POST /api/lists/{listId}/move-to-cart with one or more productIds and desired quantities
-            THEN those quantities are added to the user’s active cart (creating if needed), respecting stock availability at move time; unavailable items are reported in the response with reasons; the cart and affected list are returned updated.
-        AC9: Handle unavailable or discontinued products in list responses
-            GIVEN a list that includes products that are now inactive or out-of-stock
-            WHEN the user GETs /api/lists/{listId}
-            THEN the response flags such items (e.g., available=false, status=OUT_OF_STOCK/DISCONTINUED) without blocking read operations.
-        AC10: Security and ownership
-            GIVEN a user tries to access or modify another user’s list
-            WHEN they call any /api/lists endpoint with a listId not owned by them
-            THEN the API responds 403 Forbidden.
-    Definition of Done (checklist)
-        Code reviewed and merged; follows existing package and DTO conventions.
-        Unit tests for service and repository layers (list CRUD, item add/update/remove, move-to-cart happy and unhappy paths).
-        Integration tests for controller endpoints with authenticated requests.
-        MongoDB indexes created for ShoppingList.userId and status.
-        Logging added at info for key actions and debug for details.
-        API docs updated via springdoc (paths, request/response schemas).
-        Error handling returns 4xx for validation/ownership errors and 5xx only for unexpected failures.
-        Performance sanity: list endpoints return within acceptable bounds with 100+ items per list.
-        Backward compatibility: no changes to existing cart endpoints behavior.
-        Feature behind a configuration toggle if needed for controlled rollout.
-    Assumptions & Open Questions
-        Assumptions: Lists are private to the owner; duplicates consolidate by productId; name is required and 1–100 chars; no sharing in v1; max 100 lists per user and 500 items per list (enforced by validation).
-        Open questions: Should we allow archiving vs deleting? Should we support list descriptions or tags? Do we need soft delete for audit?
-    Dependencies & Risks
-        Dependencies: ProductRepository to validate product existence on add and availability on move-to-cart; CartService for cart updates.
-        Risks: Race conditions when moving many items with fast-changing stock; mitigation: re-validate stock on move and return partial success details. Potential data growth; mitigation: set practical limits and indexes.
+'User story: 1
+
+1) Story Title  
+   - Enable customers to create and manage personal Shopping Lists
+
+2) Story Recap  
+   - Today, customers cannot create custom shopping lists to group products they plan to buy later. They want to create named lists (e.g., “Weekly Groceries”, “Birthday Party”) and add/remove products, so they can quickly start an order from a list.
+
+3) Business Context & Rationale  
+   - Why: Shopping lists increase convenience and repeat purchases by letting customers pre-plan and quickly reorder commonly needed items.  
+   - Who benefits: End users (faster checkout, organization), business (higher retention and conversion), support (fewer “how do I save items?” complaints).
+
+4) Scope of Work  
+   - In scope:
+     - Introduce a new Shopping List domain model stored in MongoDB.
+     - CRUD on shopping lists: create, rename, delete, list user’s lists, fetch a single list.
+     - Manage list items: add product, update quantity, remove product, get list details.
+     - Default validations: product must exist, quantity > 0.
+     - Security: only the list owner can access/modify their lists.
+     - Make it easy to later use a shopping list to populate a cart (not implementing the “start order from list” workflow here; see assumptions).
+   - Out of scope:
+     - Checkout directly from a shopping list (future story).
+     - Sharing lists, collaborative editing, public lists.
+     - Advanced list templates, reminders, or notifications.
+
+5) Technical Context (for junior devs)  
+   - Likely impacted modules:
+     - New: entity/ShoppingList.java, repository/ShoppingListRepository.java, dto/shoppinglist/*, controller/ShoppingListController.java, service/ShoppingListService.java.
+     - Existing: ProductRepository (to validate product existence), SecurityConfiguration (endpoint access rules).
+   - API shape (proposed, consistent with existing routes):
+     - POST /api/shopping-lists               -> create a list
+     - GET  /api/shopping-lists               -> list all of user’s lists
+     - GET  /api/shopping-lists/{listId}      -> get one list with items
+     - PUT  /api/shopping-lists/{listId}      -> rename list
+     - DELETE /api/shopping-lists/{listId}    -> delete list
+     - POST /api/shopping-lists/{listId}/items           -> add item {productId, quantity}
+     - PUT  /api/shopping-lists/{listId}/items           -> update item quantity {productId, quantity}
+     - DELETE /api/shopping-lists/{listId}/items/{productId} -> remove item
+   - Data model (proposed):
+     - ShoppingList { id, userId (indexed), name (unique per user), items[], createdAt, updatedAt }
+     - ShoppingListItem { productId, productSku, productName, snapshotPrice, currency, quantity, addedAt, updatedAt, productImageUrl }
+     - Index: { userId, name } unique to avoid duplicate list names per user; index userId for listing.
+   - Security:
+     - Reuse existing auth. Current controllers pass userId as a request param; short-term we can align with that pattern; long-term derive from JWT subject once available.
+   - Constraints mentioned by product:
+     - Maintainability: mirror DTO pattern used in cart/product.
+     - Performance & scalability: index userId; paginate if needed (future).
+     - Security: enforce ownership checks server-side for every list access.
+
+6) Acceptance Criteria (use Gherkin-style where possible)  
+   - GIVEN a logged-in user  
+     WHEN they POST /api/shopping-lists with name = “Weekly Groceries”  
+     THEN a 201 response returns a ShoppingListResponse with that name, empty items, and metadata.
+   - GIVEN a user with an existing list “Weekly Groceries”  
+     WHEN they PUT /api/shopping-lists/{listId} to rename to “Groceries This Week”  
+     THEN the list name is updated and returned with 200, and updatedAt reflects the change.
+   - GIVEN a list owned by user A  
+     WHEN user B attempts GET/PUT/DELETE on that list  
+     THEN a 403 Forbidden is returned.
+   - GIVEN a user’s list  
+     WHEN they POST /api/shopping-lists/{listId}/items with {productId, quantity=3} and product exists  
+     THEN the product is added (or merged by incrementing quantity if already present) and 200 returns the updated list.
+   - GIVEN a user’s list  
+     WHEN they POST items with a non-existent productId  
+     THEN a 404 Not Found is returned with an error message “Product not found”.
+   - GIVEN a user’s list with a product at quantity 5  
+     WHEN they PUT /api/shopping-lists/{listId}/items with {productId, quantity=2}  
+     THEN the quantity is set to 2 (not incremented) and a 200 is returned.
+   - GIVEN a user’s list with a product  
+     WHEN they DELETE /api/shopping-lists/{listId}/items/{productId}  
+     THEN the item is removed, and the response includes the updated list.
+   - GIVEN a logged-in user with multiple lists  
+     WHEN they GET /api/shopping-lists  
+     THEN a 200 returns only their lists (not other users’), sorted by updatedAt desc (if implemented).
+
+7) Definition of Done (checklist)  
+   - Entity, repository, service, controller, and DTOs created and validated.  
+   - Ownership and authorization checks implemented; unauthenticated -> 401, unauthorized -> 403.  
+   - Unit tests for service logic (CRUD, item add/update/remove, validations).  
+   - Integration tests for controller endpoints (happy paths + error cases).  
+   - MongoDB indexes created (userId, unique compound userId+name).  
+   - API docs exposed via springdoc updated with new endpoints.  
+   - Structured logs at INFO for key actions; DEBUG for details; no sensitive data in logs.  
+   - Code reviewed, merged, and feature behind a configuration flag if risky.  
+   - Basic performance smoke test (lists with >= 100 items) executes within acceptable latency.
+
+8) Assumptions & Open Questions  
+   - Assumptions:
+     - A list can contain products even if currently out of stock; availability is checked only when moving items to the cart.  
+     - List names are unique per user (case-insensitive).  
+     - Max 50 lists per user; max 500 items per list (guardrails to prevent abuse).  
+     - We keep a price snapshot for display; actual price is re-validated at checkout.
+   - Open questions:
+     - Should we support sharing lists with other users?  
+     - Do we need pagination for lists/items at launch?  
+     - Should duplicate products in a list be prevented or merged automatically? (We propose auto-merge.)
+
+9) Dependencies & Risks  
+   - Dependencies: ProductRepository for validating product existence; SecurityConfiguration/JWT for auth.  
+   - Risks:
+     - Name uniqueness race conditions (mitigate via unique index and handle duplicate key errors).  
+     - Data growth in lists (mitigate with limits and indexing).  
+     - Inconsistent product snapshots vs. current price (mitigate by re-validating at add-to-cart time).
+
 
 User story: 2
-    Story Title
-        “Save for later” (stash) items from cart, and stash entire cart as a named list
-    Story Recap
-        Customers add items to the cart but may not be ready to buy now. They want to “stash” items for later without losing them. Currently, the cart only supports add/update/remove, and items expire after a period. There’s no explicit save-for-later function.
-    Business Context & Rationale
-        Why: Save-for-later reduces cart abandonment frustration, keeps users engaged, and increases the chance they return to purchase.
-        Who benefits: Customers (convenience), business (recovered revenue, improved retention).
-    Outcome: Users can move items from cart to a saved area and later move them back to the cart. Optionally, they can stash the entire cart into a new or existing shopping list.
-    Scope of Work
-        In scope:
-            Add “save for later” capability at the item level on the cart: move item from cart to a default list named “Saved for later”.
-            Add endpoint to stash the entire current cart into a named list (either into “Saved for later” or any custom list).
-            Move items back from “Saved for later” to the cart with availability checks.
-            Preserve item snapshots in lists; re-validate stock and availability when moving back to cart.
-            Responses should clearly report items that could not be moved and why (out-of-stock, discontinued).
-        Out of scope:
-            Cross-device real-time UX; front-end considerations are not part of this back-end story.
-            Notifications when stock or prices change.
-            Technical Context (for junior devs)
-            Reuse new Shopping List domain from Story 1.
-    New/updated endpoints under cart and lists:
-        POST /api/cart/items/{productId}/save-for-later -> moves the item out of cart into “Saved for later” list (create the list if it doesn’t exist).
-        POST /api/cart/stash -> body: { listName?: string, listId?: string, includeQuantities: boolean } to save the entire cart into a target list and clear items from cart if specified.
-        POST /api/lists/{listId}/move-to-cart -> already covered in Story 1 AC8.
-    Impacted classes: CartController, CartService (add saveForLater and stashCart methods), ShoppingListService (create/find “Saved for later” per user), ProductRepository (validation).
-    Constraints:
-        Security: endpoints authenticated; respect current pattern of userId passed as request param until user extraction is standardized.
-        Performance & scalability: avoid fetching product details for every list read; do fetch/check when moving back to cart.
-        Maintainability: Align DTOs and error handling with existing patterns in CartService.
-    Acceptance Criteria (use Gherkin-style where possible)
-        AC1: Save a single cart item for later (covers “No option to stash my current items in the shopping cart”)
-            GIVEN an authenticated user with an active cart containing product P
-            WHEN they POST /api/cart/items/{P}/save-for-later
-            THEN product P is removed from the cart and added to the user’s “Saved for later” list (creating it if absent), and the response includes updated cart and list snapshots.
-        AC2: Save multiple items for later
-            GIVEN an authenticated user with multiple items in the cart
-            WHEN they POST /api/cart/stash with a body specifying itemIds or “all=true” and target listId or listName
-            THEN all specified items are moved to the target list and removed from the cart, returning updated cart and list.
-        AC3: Move item back to cart
-            GIVEN an authenticated user with product P in “Saved for later”
-            WHEN they POST /api/lists/{savedListId}/move-to-cart with product P and desired quantity
-            THEN P is added to the active cart if it’s available and in stock; otherwise P remains in the list and the response includes a reason.
-        AC4: Idempotency on save-for-later
-            GIVEN an authenticated user attempts to save the same product for later twice
-            WHEN they repeat POST /api/cart/items/{P}/save-for-later
-            THEN the list quantity increments rather than creating duplicate entries, and the cart does not contain P.
-        AC5: Unavailable products
-            GIVEN a product in “Saved for later” becomes discontinued or out-of-stock
-            WHEN the user attempts to move it back to the cart
-            THEN the response indicates failure for that product with an explanatory message; the operation for other items still succeeds.
-        AC6: Security and ownership
-            GIVEN a user tries to move items into another user’s list
-            WHEN they POST any save-for-later or move-to-cart endpoint with a foreign listId
-            THEN the API responds 403 Forbidden.
-    Definition of Done (checklist)
-        Code merged with tests for save-for-later single and bulk flows, and move-back-to-cart flows (success/partial/failure).
-        Integration tests cover security (401/403) and happy path.
-        API docs updated (new endpoints, request/response DTOs, example payloads).
-        Logging: info for actions, debug with productIds and listIds; no sensitive data in logs.
-        MongoDB indexes confirmed for lists (userId, status).
-        Performance validated with carts of 100+ items; responses return in acceptable time.
-        Backward compatibility: existing cart behavior unchanged if feature not used.
-    Assumptions & Open Questions
-        Assumptions: “Saved for later” is a per-user, system-created list named exactly “Saved for later”; moving items removes them from cart by default.
-        Open questions: Should “stash” copy or move items by default? For this story we default to move; copy could be an optional param in future.
-    Dependencies & Risks
-        Depends on Story 1’s Shopping List domain and endpoints.
-        Risks: Race conditions with cart updates during stash; mitigate by reloading and verifying cart state before moving items. Consistency issues if partial failures occur; mitigate with clear partial success responses and item-by-item status reporting.
+
+1) Story Title  
+   - Allow customers to “Save for Later” (stash) items from their cart
+
+2) Story Recap  
+   - Customers can add items to the cart, but there’s no way to temporarily stash items for future orders without deleting them. They need a “Save for Later” action that removes items from the cart and stores them in a personal saved list for future use.
+
+3) Business Context & Rationale  
+   - Why: “Save for Later” reduces cart abandonment by letting users defer items without losing them, leading to more future purchases.  
+   - Who benefits: Customers (flexibility), business (recover deferred purchases), support (fewer “I lost my cart items” complaints).
+
+4) Scope of Work  
+   - In scope:
+     - Introduce Save-for-Later behavior that moves items from the active cart into a user-owned container for later retrieval.
+     - Integrate with the shopping list domain from Story 1 by using a default list named “Saved for Later” per user.
+     - Endpoints to save items from cart to this default list and to move items back to cart.
+     - View saved-for-later items via shopping lists APIs.
+     - Validations similar to cart operations when moving items back into the cart (availability, stock).
+   - Out of scope:
+     - Bulk move entire cart to saved list (future enhancement).  
+     - Notifications or reminders about saved items.
+
+5) Technical Context (for junior devs)  
+   - Impacted modules:
+     - CartController/CartService (new operations for save-for-later and move-back-to-cart).  
+     - ShoppingListService (to create/find the user’s “Saved for Later” list and add/remove items).  
+     - DTOs: create SaveForLaterRequest {productId, quantity, destinationListId optional}, MoveFromListToCartRequest {listId, productId, quantity}.  
+   - API shape (proposed, consistent with existing pattern of userId as param):
+     - POST /api/cart/items/save-for-later?userId={userId}  
+       Body: { productId, quantity, destinationListId? }  
+       Behavior: remove quantity from cart; add to specified list or default “Saved for Later”.
+     - POST /api/cart/items/move-from-list?userId={userId}  
+       Body: { listId, productId, quantity }  
+       Behavior: remove from the list; validate product availability and stock; add to cart (merge quantities).
+   - Security: only the owner can save or retrieve their items; deny cross-user access.
+   - Data considerations:
+     - If removing a partial quantity from the cart, reduce item quantity; if zero, remove the item entry.  
+     - If adding to the list and item exists, increment quantity; else create new item entry.
+
+6) Acceptance Criteria (use Gherkin-style where possible)  
+   - GIVEN a user with an active cart containing product P with quantity 3  
+     WHEN they POST /api/cart/items/save-for-later with {productId: P, quantity: 2}  
+     THEN the cart’s quantity for P becomes 1 and P is added to the user’s “Saved for Later” list with quantity increased by 2.
+   - GIVEN a user whose cart contains product P with quantity 1  
+     WHEN they save-for-later {productId: P, quantity: 1}  
+     THEN product P is removed from the cart and appears in “Saved for Later” with quantity incremented by 1.
+   - GIVEN a user has no “Saved for Later” list yet  
+     WHEN they first use save-for-later  
+     THEN the system auto-creates a private list named exactly “Saved for Later” and places the item there.
+   - GIVEN a user’s saved-for-later list contains product P quantity 5  
+     WHEN they POST /api/cart/items/move-from-list with {listId, productId: P, quantity: 3} and product is available and in stock  
+     THEN P is removed by 3 from the list (remaining 2) and added/merged into the cart by 3; response returns updated CartResponse.
+   - GIVEN a user attempts to move an item back to cart but the product is out of stock or unavailable  
+     WHEN they call move-from-list  
+     THEN a 409 Conflict (or 400) is returned with a message “Insufficient stock” or “Product not available,” and no changes are made.
+   - GIVEN a user tries to save-for-later a product not present in their cart  
+     WHEN they call save-for-later  
+     THEN a 404 Not Found is returned with message “Product not found in cart”.
+   - GIVEN an unauthenticated request  
+     WHEN calling either endpoint  
+     THEN a 401 Unauthorized is returned.
+
+7) Definition of Done (checklist)  
+   - New DTOs created and validated; endpoints implemented with proper status codes and consistent responses.  
+   - Ownership checks and authentication enforced.  
+   - Unit tests: cart removal/partial removal; list add/merge; error paths (not in cart, invalid quantity).  
+   - Integration tests: end-to-end move cart->list and list->cart including availability checks.  
+   - Logging: INFO on moves; DEBUG for details (quantities, ids); no sensitive data.  
+   - API docs updated; examples added.  
+   - Backward compatibility: no breaking changes to existing cart endpoints.  
+   - Basic performance validation for carts/lists up to 200 items.
+
+8) Assumptions & Open Questions  
+   - Assumptions:
+     - Default list name is exactly “Saved for Later” and unique per user.  
+     - Quantity in save-for-later must be <= current cart quantity; quantity > cart quantity returns 400.  
+     - Using request param userId for now; later we will derive from JWT subject.
+   - Open questions:
+     - Should we allow specifying a custom destination list for save-for-later by listId? (We proposed optional destinationListId.)  
+     - What response shape should save-for-later return? We propose returning updated CartResponse, plus perhaps a header or link to the affected shopping list.
+
+9) Dependencies & Risks  
+   - Dependencies: Story 1 (shopping lists) must be delivered first or in parallel to provide the destination container.  
+   - Risks:
+     - Concurrency: simultaneous updates from multiple devices could cause quantity drift (mitigate by re-reading and saving atomically; consider optimistic concurrency in a future story).  
+     - User confusion if same product is both in cart and saved list (we’ll handle by clear separation and accurate quantities).
+
 
 User story: 3
-    Story Title
-        One-click “Clear my cart” with confirmation and safe failure behavior
-    Story Recap
-        Customers can add items to their cart but there is no convenient way to clear all items and start fresh. While Cart has a clear() method internally, there is no API endpoint to expose this functionality.
-    Business Context & Rationale
-        Why: Clearing the cart is a basic expectation. It reduces friction for customers who change their minds or want to restart.
-        Who benefits: Customers (usability), support (fewer complaints), business (reduced abandonment due to frustration).
-    Scope of Work
-        In scope:
-            Add a secure endpoint to clear all items from the current user’s active cart.
-            Return the updated (now empty) cart state.
-            Provide an optional “requireConfirmation” flag to avoid accidental clears.
-        Out of scope:
-            Partial clears by category or criteria (future).
-            Multi-cart management.
-    Technical Context (for junior devs)
-        Impacted classes:
-            CartController: add a clear endpoint (e.g., DELETE /api/cart?userId=... or POST /api/cart/clear).
-            CartService: add clearCart(userId, requireConfirmation, confirmationToken?) that loads active cart, calls cart.clear(), persists, and returns CartResponse.
-            CartRepository: no change.
-    Security: Endpoint must be authenticated as per SecurityConfiguration; validate user ownership like other cart endpoints.
-    Constraints:
-        Maintainability: follow existing DTO/response style.
-        Performance: single write operation; should be O(n) for items in memory, one save to Mongo.
-    Acceptance Criteria (use Gherkin-style where possible)
-        AC1: Clear cart successfully (covers “No option to clear the shopping cart”)
-            GIVEN an authenticated user with an active cart containing items
-            WHEN they POST /api/cart/clear with userId and requireConfirmation=false
-            THEN all items are removed, updatedAt is refreshed, and the API returns the empty cart with totalItems=0, isEmpty=true.
-        AC2: Clear cart with confirmation
-            GIVEN an authenticated user with items in the cart
-            WHEN they POST /api/cart/clear with requireConfirmation=true and a confirmation value like “CONFIRM_CLEAR”
-            THEN the cart is cleared and returned empty.
-        AC3: Attempt to clear non-existent or already empty cart
-            GIVEN an authenticated user with no active cart or an already empty cart
-            WHEN they POST /api/cart/clear
-            THEN the service returns a valid cart state (creating a new empty active cart if necessary) and 200 OK.
-        AC4: Security and ownership
-            GIVEN a user tries to clear another user’s cart by passing a different userId
-            WHEN they call the endpoint
-            THEN the API responds 403 Forbidden.
-        AC5: Error handling
-            GIVEN an internal persistence error occurs
-            WHEN clearing the cart
-            THEN the API returns 5xx with a meaningful error message and no partial state is exposed to the client.
-    Definition of Done (checklist)
-        New controller endpoint implemented and documented in springdoc UI.
-        Unit tests for CartService.clearCart (existing, empty, and non-existent cart scenarios).
-        Integration tests for authentication/authorization and happy/unhappy paths.
-        Logs added (info on clear requests; debug includes userId and cartId).
-        No breaking changes to existing endpoints.
-        Performance validated with carts containing 100+ items.
-    Assumptions & Open Questions
-        Assumptions: We continue passing userId as a request parameter until user context extraction via JWT is standardized across the app; confirmation token is a simple constant string in v1.
-        Open questions: Should clearing the cart be a DELETE on /api/cart or a POST to /api/cart/clear? For now, POST /api/cart/clear is acceptable as we return a body.
-    Dependencies & Risks
-        Dependencies: MongoDB write operations reliability.
-        Risks: Accidental cart clears; mitigation through optional confirmation flag and clear labeling in API docs.
-        Security risk: userId spoofing in param; mitigation is to align with JWT-subject-based user resolution in a future story and server-side validation once available.
 
+1) Story Title  
+   - Provide a “Clear Cart” action to empty the current shopping cart
 
+2) Story Recap  
+   - Customers can add items to their cart but cannot quickly clear all items and start fresh. They need a single action to empty the cart without deleting individual items one by one.
 
+3) Business Context & Rationale  
+   - Why: Reduces friction when users want to start over, improving user experience and reducing abandonment from frustration.  
+   - Who benefits: End users (efficiency), support (fewer “how do I reset my cart?” issues).
+
+4) Scope of Work  
+   - In scope:
+     - Add an endpoint to clear all items from the user’s active cart.  
+     - Idempotent behavior: clearing an already empty or non-existent active cart returns a success with an empty cart state.  
+     - Update cart metadata: updatedAt should reflect the operation; keep status ACTIVE.
+   - Out of scope:
+     - Deleting the cart record itself.  
+     - Affecting saved-for-later lists or shopping lists.
+
+5) Technical Context (for junior devs)  
+   - Impacted modules:
+     - CartService: add a clearCart(userId) method using Cart.clear().  
+     - CartController: expose an endpoint consistent with existing patterns.
+   - API shape (proposed to match current style):
+     - DELETE /api/cart?userId={userId}  
+       Response: 200 with CartResponse representing an empty cart (totalItems=0, isEmpty=true).
+   - Current code notes:
+     - Cart entity already has clear() and isEmpty() methods.  
+     - CartService has getOrCreateCart(userId) we can reuse to ensure idempotence.  
+     - SecurityConfiguration requires authentication for “anyRequest()”; continue to enforce auth.
+
+6) Acceptance Criteria (use Gherkin-style where possible)  
+   - GIVEN a logged-in user with items in their cart  
+     WHEN they DELETE /api/cart?userId={userId}  
+     THEN the response is 200 and CartResponse shows items=[], totalItems=0, isEmpty=true, and updatedAt is refreshed.
+   - GIVEN a logged-in user with no active cart  
+     WHEN they call DELETE /api/cart?userId={userId}  
+     THEN a new empty ACTIVE cart is created (or returned) and a 200 CartResponse reflects empty state.
+   - GIVEN a logged-in user with an already empty cart  
+     WHEN they call DELETE /api/cart?userId={userId} again  
+     THEN a 200 is returned and the cart remains empty (idempotent).
+   - GIVEN an unauthenticated request  
+     WHEN calling DELETE /api/cart  
+     THEN a 401 Unauthorized is returned.
+
+7) Definition of Done (checklist)  
+   - New controller endpoint and CartService.clearCart implemented and wired.  
+   - Unit tests for service clear logic (with items, empty, no cart).  
+   - Integration test for endpoint (authz, success, idempotent).  
+   - Logs: INFO on clear operation with userId; no sensitive data.  
+   - API docs updated with endpoint description and examples.  
+   - Code reviewed and merged; no breaking changes to existing cart APIs.
+
+8) Assumptions & Open Questions  
+   - Assumptions:
+     - Clearing the cart does not affect “Saved for Later” or shopping lists.  
+     - Currency and status fields in CartResponse remain consistent (currency “USD” as today).  
+     - We continue to accept userId as a request parameter for now.
+   - Open questions:
+     - Should we return 204 No Content instead of 200 with CartResponse? We propose 200 to match current controller patterns that return CartResponse bodies.
+
+9) Dependencies & Risks  
+   - Dependencies: Authentication/authorization as configured in SecurityConfiguration.  
+   - Risks:
+     - If later we switch to deriving userId from JWT, we must update this endpoint’s signature accordingly (backward compatibility consideration under feature versioning).  
+     - Concurrency: clearing while another device adds items may cause race conditions (acceptable for now; future story can add optimistic concurrency or server-side cart sessions).'

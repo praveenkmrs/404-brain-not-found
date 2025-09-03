@@ -1,74 +1,46 @@
-User Story 1: Customers can create and manage multiple shopping lists (wishlists) and purchase from them
-Design Outline (with trade-offs)
-Proposed approach
-Chosen: Introduce a new Shopping List domain mirroring the Cart/CartItem design for consistency and maintainability. Implement:
-Entity: ShoppingList, ShoppingListItem (MongoDB documents).
-Repository: ShoppingListRepository with userId and status indexes, and list-level queries.
-Service: ShoppingListService handling CRUD, item operations, and move-to-cart orchestration (validates product availability at move-to-cart time).
-Controller: ShoppingListController under /api/lists. All endpoints authenticated by default per SecurityConfiguration (anyRequest().authenticated()).
-DTOs: Align with existing DTO patterns for request/response.
-Alternatives considered:
-Reuse Cart entity with a type field (cart vs list). Rejected to avoid overloading the Cart semantics and to keep lifecycle/status logic decoupled.
-Join-like pattern without snapshotting product details. Rejected due to potential N+1 reads and need for historical snapshots.
-Complexity/risks and mitigations
-Risk: Product availability changes between list creation and move-to-cart.
-Mitigation: Snapshot product details on add-to-list; revalidate stock/availability only on move-to-cart (as required). For list reads, batch-fetch products by IDs to flag current availability (single $in query, avoids N+1).
-Risk: Large lists (up to 500 items) — performance.
-Mitigation: Indexed Mongo queries; use findAllById(products) to check availability in a single call.
-Risk: Ownership/security.
-Mitigation: Validate list.userId == userId param; throw 403 AccessDeniedException on mismatch.
-Backward compatibility strategy
-Entirely additive. Existing cart/product flows unchanged.
-Feature flag: feature.shoppingLists.enabled (default true). Controllers check flag and return 404 if disabled.
-Decision documentation
-We mirror Cart design for lower cognitive load and consistent DTOs. We do a single batch product availability check on GET list by ID to satisfy AC9 without incurring N+1 overhead.
-Step-by-Step Implementation Plan (JUNIOR-FRIENDLY CHECKLIST) 2.1 Pre-work
- Create branch
-Command: git checkout -b feature/shopping-lists-v1
- Sync, build, run tests locally
-Command: git pull origin main
-Command: mvn clean verify
-Start app (Mongo must be running): mvn spring-boot:run
+'User Story 1: Customers can create and manage shopping lists, and stash the current cart for later
+
+1) Design Outline (with trade-offs)
+- Proposed approach
+  - Alternative A (Chosen): Add a new ShoppingList aggregate with its own entity, repository, DTOs, service, and controller. Keep CartService mostly unchanged; implement bulk cart operations inside ShoppingListService using CartRepository to minimize changes. Add one new public method to CartService (clearCart) to support “move” stash and to prepare for Story 2.
+    - Why: Additive change; isolates list logic; minimal risk to existing cart flows; simplifies rollout and testing.
+  - Alternative B: Extend CartService heavily to handle lists and stash logic internally.
+    - Trade-off: Tighter coupling, larger changes, higher risk to existing cart behavior.
+- Complexity/risks and mitigations
+  - Partial transfer failures (out of stock/inactive): Build a TransferToCartResponse with failedItems reasons. Mitigation: batch-fetch products to avoid N+1 and evaluate availability before writing.
+  - Name uniqueness per user: Add unique compound index (userId, name) and check existsByUserIdAndName before creation/rename. Handle duplicate name with 409 Conflict.
+  - Security and ownership: All list fetches must be scoped by both listId and userId. Mitigation: repository methods findByIdAndUserId, deleteByIdAndUserId. Controller validates user ownership each time.
+- Backward compatibility strategy
+  - Additive endpoints (/api/lists/**, POST /api/cart/stash). No changes to existing /api/cart endpoints. Cart merge semantics remain unchanged.
+- Design decision (record)
+  - Create ShoppingList domain mirroring CartItem structures to ease conversions. ShoppingListService coordinates between ProductRepository for snapshots, CartService/CartRepository for stash/transfer operations, ensuring minimal changes to existing cart flows.
+
+2) Step-by-Step Implementation Plan (JUNIOR-FRIENDLY CHECKLIST)
+
+2.1 Pre-work
+- [ ] Create branch
+  - git checkout -b feature/shopping-lists-and-stash
+- [ ] Sync, build, run tests locally
+  - mvn -q -DskipTests=false clean test
+  - mvn spring-boot:run (ensure MongoDB is running; default is localhost:27017 per application.properties)
+
 2.2 Code Changes (file-by-file)
-Path: shopping-cart/src/main/resources/application.properties
-Change summary: Enable auto index creation and add feature flag for shopping lists.
-Diff:
---- a/shopping-cart/src/main/resources/application.properties
-+++ b/shopping-cart/src/main/resources/application.properties
-@@ -1,21 +1,27 @@
- spring.application.name=shopping-cart
- 
- # Active profile - change this to switch environments
- spring.profiles.active=local
- 
- # Server configuration
- server.port=8080
- 
- # MongoDB configuration (will be overridden by profile-specific configs)
- spring.data.mongodb.host=${MONGO_HOST:localhost}
- spring.data.mongodb.port=${MONGO_PORT:27017}
- spring.data.mongodb.database=${MONGO_DATABASE:shopping-cart}
-Ensure Mongo indexes are created from @Indexed
-spring.data.mongodb.auto-index-creation=true
-Actuator configuration for health checks
-management.endpoints.web.exposure.include=health,info,metrics management.endpoint.health.show-details=when-authorized management.health.mongo.enabled=true
-API Documentation
-springdoc.api-docs.path=/api-docs springdoc.swagger-ui.path=/swagger-ui.html
-Feature flags
-feature.shoppingLists.enabled=true ```
-New file: shopping-cart/src/main/java/pk/ai/shopping_cart/entity/ShoppingListItem.java
-Purpose: Snapshot of product details inside a list.
-Content:
+
+A) New Entities
+
+- Path: shopping-cart/src/main/java/pk/ai/shopping_cart/entity/ShoppingListItem.java
+- Change summary: New entity representing an item saved to a shopping list, mirroring CartItem fields for easy conversion.
+- New file:
+```java
 package pk.ai.shopping_cart.entity;
 
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
-
+import lombok.*;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
+/**
+ * Shopping list item representing a saved product snapshot
+ */
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
@@ -77,47 +49,41 @@ public class ShoppingListItem {
     private String productId;
     private String productSku;
     private String productName;
-    private BigDecimal unitPrice;
+    private BigDecimal unitPrice; // snapshot at time of save
     private String currency;
     private Integer quantity;
     private String productImageUrl;
     private LocalDateTime addedAt;
     private LocalDateTime updatedAt;
 
-    public BigDecimal getTotalPrice() {
-        if (unitPrice == null || quantity == null) return BigDecimal.ZERO;
-        return unitPrice.multiply(BigDecimal.valueOf(quantity));
-    }
-
-    public void updateQuantity(int newQuantity) {
-        this.quantity = newQuantity;
+    public void updateQuantity(int newQty) {
+        this.quantity = newQty;
         this.updatedAt = LocalDateTime.now();
     }
 }
-New file: shopping-cart/src/main/java/pk/ai/shopping_cart/entity/ShoppingList.java
-Purpose: Mongo entity for shopping lists.
-Content:
+```
+
+- Path: shopping-cart/src/main/java/pk/ai/shopping_cart/entity/ShoppingList.java
+- Change summary: New aggregate for shopping lists with unique (userId, name) index, plus helpers similar to Cart.
+- New file:
+```java
 package pk.ai.shopping_cart.entity;
 
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import lombok.*;
 import org.springframework.data.annotation.Id;
+import org.springframework.data.mongodb.core.index.CompoundIndex;
 import org.springframework.data.mongodb.core.index.Indexed;
 import org.springframework.data.mongodb.core.mapping.Document;
 
-import java.math.BigDecimal;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
 @Document(collection = "shopping_lists")
+@CompoundIndex(name = "uid_name_unique", def = "{\'userId\':1, \'name\':1}", unique = true)
 public class ShoppingList {
     @Id
     private String id;
@@ -125,23 +91,27 @@ public class ShoppingList {
     @Indexed
     private String userId;
 
+    @Indexed
     private String name;
 
     @Builder.Default
     private List<ShoppingListItem> items = new ArrayList<>();
 
-    @Indexed
-    private ListStatus status;
+    private ShoppingListStatus status;
 
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
-    public enum ListStatus {
+    public enum ShoppingListStatus {
         ACTIVE,
         ARCHIVED
     }
 
-    public void addOrIncrementItem(ShoppingListItem newItem) {
+    public Optional<ShoppingListItem> findItemByProductId(String productId) {
+        return items.stream().filter(i -> i.getProductId().equals(productId)).findFirst();
+    }
+
+    public void addOrIncreaseItem(ShoppingListItem newItem) {
         Optional<ShoppingListItem> existing = findItemByProductId(newItem.getProductId());
         if (existing.isPresent()) {
             ShoppingListItem item = existing.get();
@@ -155,17 +125,15 @@ public class ShoppingList {
     }
 
     public boolean updateItemQuantity(String productId, int quantity) {
-        Optional<ShoppingListItem> item = findItemByProductId(productId);
-        if (item.isPresent()) {
-            if (quantity <= 0) {
-                return removeItem(productId);
-            } else {
-                item.get().updateQuantity(quantity);
-                this.updatedAt = LocalDateTime.now();
-                return true;
-            }
+        Optional<ShoppingListItem> existing = findItemByProductId(productId);
+        if (existing.isEmpty()) return false;
+        if (quantity <= 0) {
+            return removeItem(productId);
+        } else {
+            existing.get().updateQuantity(quantity);
+            this.updatedAt = LocalDateTime.now();
+            return true;
         }
-        return false;
     }
 
     public boolean removeItem(String productId) {
@@ -174,121 +142,138 @@ public class ShoppingList {
         return removed;
     }
 
-    public Optional<ShoppingListItem> findItemByProductId(String productId) {
-        return items.stream().filter(i -> i.getProductId().equals(productId)).findFirst();
-    }
-
     public int getTotalItems() {
         return items.stream().mapToInt(ShoppingListItem::getQuantity).sum();
     }
 
-    public BigDecimal getTotalPrice() {
-        return items.stream()
-                .map(ShoppingListItem::getTotalPrice)
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
+    public boolean isEmpty() {
+        return items.isEmpty();
     }
 }
-New file: shopping-cart/src/main/java/pk/ai/shopping_cart/repository/ShoppingListRepository.java
-Purpose: Mongo repo for lists.
-Content:
+```
+
+B) New Repository
+
+- Path: shopping-cart/src/main/java/pk/ai/shopping_cart/repository/ShoppingListRepository.java
+- Change summary: Repository with user-scoped operations and pagination.
+- New file:
+```java
 package pk.ai.shopping_cart.repository;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.mongodb.repository.MongoRepository;
-import org.springframework.data.mongodb.repository.Query;
 import org.springframework.stereotype.Repository;
 import pk.ai.shopping_cart.entity.ShoppingList;
 
-import java.util.List;
 import java.util.Optional;
 
 @Repository
 public interface ShoppingListRepository extends MongoRepository<ShoppingList, String> {
-    List<ShoppingList> findByUserId(String userId);
-    List<ShoppingList> findByUserIdAndStatus(String userId, ShoppingList.ListStatus status);
+    Page<ShoppingList> findByUserId(String userId, Pageable pageable);
     Optional<ShoppingList> findByIdAndUserId(String id, String userId);
-
-    @Query("{ 'userId': ?0, 'name': ?1, 'status': 'ACTIVE' }")
-    Optional<ShoppingList> findActiveByUserIdAndName(String userId, String name);
-
-    long countByUserIdAndStatus(String userId, ShoppingList.ListStatus status);
+    Optional<ShoppingList> findByUserIdAndName(String userId, String name);
+    boolean existsByUserIdAndName(String userId, String name);
+    void deleteByIdAndUserId(String id, String userId);
 }
-New DTO files under shopping-cart/src/main/java/pk/ai/shopping_cart/dto/list/
-ListCreateRequest.java
+```
+
+C) New DTOs
+
+- Path: shopping-cart/src/main/java/pk/ai/shopping_cart/dto/list/CreateShoppingListRequest.java
+```java
 package pk.ai.shopping_cart.dto.list;
 
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Size;
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import lombok.*;
 
 @Data
-@Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class ListCreateRequest {
-    @NotBlank(message = "Name is required")
-    @Size(min = 1, max = 100, message = "Name must be 1-100 chars")
+@Builder
+public class CreateShoppingListRequest {
+    @NotBlank(message = "List name is required")
     private String name;
 }
-ListRenameRequest.java
+```
+
+- Path: shopping-cart/src/main/java/pk/ai/shopping_cart/dto/list/UpdateShoppingListRequest.java
+```java
 package pk.ai.shopping_cart.dto.list;
 
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Size;
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import lombok.*;
 
 @Data
-@Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class ListRenameRequest {
-    @NotBlank
-    @Size(min = 1, max = 100)
+@Builder
+public class UpdateShoppingListRequest {
+    @NotBlank(message = "List name is required")
     private String name;
 }
-ListItemRequest.java
+```
+
+- Path: shopping-cart/src/main/java/pk/ai/shopping_cart/dto/list/AddToShoppingListRequest.java
+```java
 package pk.ai.shopping_cart.dto.list;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import lombok.*;
 
 @Data
-@Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class ListItemRequest {
-    @NotBlank
+@Builder
+public class AddToShoppingListRequest {
+    @NotBlank(message = "Product ID is required")
     private String productId;
-    @NotNull
-    @Positive
+
+    @NotNull(message = "Quantity is required")
+    @Positive(message = "Quantity must be positive")
     private Integer quantity;
 }
-ListItemResponse.java
+```
+
+- Path: shopping-cart/src/main/java/pk/ai/shopping_cart/dto/list/UpdateShoppingListItemRequest.java
+```java
 package pk.ai.shopping_cart.dto.list;
 
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Positive;
+import lombok.*;
+
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class UpdateShoppingListItemRequest {
+    @NotBlank(message = "Product ID is required")
+    private String productId;
+
+    @NotNull(message = "Quantity is required")
+    @Positive(message = "Quantity must be positive")
+    private Integer quantity;
+}
+```
+
+- Path: shopping-cart/src/main/java/pk/ai/shopping_cart/dto/list/ShoppingListItemResponse.java
+```java
+package pk.ai.shopping_cart.dto.list;
+
+import lombok.*;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 @Data
-@Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class ListItemResponse {
+@Builder
+public class ShoppingListItemResponse {
     private String productId;
     private String productSku;
     private String productName;
@@ -296,1208 +281,980 @@ public class ListItemResponse {
     private BigDecimal unitPrice;
     private String currency;
     private Integer quantity;
-    private BigDecimal totalPrice;
     private LocalDateTime addedAt;
     private LocalDateTime updatedAt;
-
-    // Availability flags at read-time
-    private boolean available;
-    private String productStatus;
-    private Integer currentStockQuantity;
 }
-ListResponse.java
+```
+
+- Path: shopping-cart/src/main/java/pk/ai/shopping_cart/dto/list/ShoppingListResponse.java
+```java
 package pk.ai.shopping_cart.dto.list;
 
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import lombok.*;
 
-import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
 
 @Data
-@Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class ListResponse {
+@Builder
+public class ShoppingListResponse {
     private String id;
     private String userId;
     private String name;
-    private String status;
-    private List<ListItemResponse> items;
+    private List<ShoppingListItemResponse> items;
     private Integer totalItems;
-    private BigDecimal totalPrice;
+    private String status;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
+    private boolean empty;
 }
-MoveToCartRequest.java
+```
+
+- Path: shopping-cart/src/main/java/pk/ai/shopping_cart/dto/list/StashCartRequest.java
+```java
 package pk.ai.shopping_cart.dto.list;
 
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
-
-import java.util.List;
+import lombok.*;
 
 @Data
-@Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class MoveToCartRequest {
-    // One or more items to move
+@Builder
+public class StashCartRequest {
+    private String targetListId;   // optional
+    private String newListName;    // optional
     @Builder.Default
-    private List<ItemQuantity> items = List.of();
-
-    @Data
-    @Builder
-    @NoArgsConstructor
-    @AllArgsConstructor
-    public static class ItemQuantity {
-        private String productId;
-        private Integer quantity;
-    }
+    private boolean keepInCart = false; // default false for move
 }
-MoveToCartResponse.java
+```
+
+- Path: shopping-cart/src/main/java/pk/ai/shopping_cart/dto/list/StashCartResponse.java
+```java
 package pk.ai.shopping_cart.dto.list;
 
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import lombok.*;
+
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class StashCartResponse {
+    private boolean success;
+    private boolean cartWasEmpty;
+    private String action; // NONE | COPIED | MOVED
+    private ShoppingListResponse list; // may be null if no list created/modified
+}
+```
+
+- Path: shopping-cart/src/main/java/pk/ai/shopping_cart/dto/list/TransferListToCartRequest.java
+```java
+package pk.ai.shopping_cart.dto.list;
+
+import lombok.*;
+
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class TransferListToCartRequest {
+    @Builder.Default
+    private boolean overwriteQuantities = false;
+}
+```
+
+- Path: shopping-cart/src/main/java/pk/ai/shopping_cart/dto/list/TransferToCartResponse.java
+```java
+package pk.ai.shopping_cart.dto.list;
+
+import lombok.*;
 import pk.ai.shopping_cart.dto.cart.CartResponse;
 
 import java.util.List;
 
 @Data
-@Builder
 @NoArgsConstructor
 @AllArgsConstructor
-public class MoveToCartResponse {
+@Builder
+public class TransferToCartResponse {
     private CartResponse cart;
-    private ListResponse list;
-    private List<ItemResult> movedItems;
-    private List<ItemResult> failedItems;
+    private List<FailedItem> failedItems;
 
     @Data
-    @Builder
     @NoArgsConstructor
     @AllArgsConstructor
-    public static class ItemResult {
+    @Builder
+    public static class FailedItem {
         private String productId;
-        private Integer requestedQuantity;
-        private Integer movedQuantity;
-        private String status; // MOVED / FAILED
-        private String reason; // out-of-stock, discontinued, not-found, etc.
+        private String reason; // OUT_OF_STOCK | PRODUCT_INACTIVE | NOT_FOUND
     }
 }
-New file: shopping-cart/src/main/java/pk/ai/shopping_cart/service/ShoppingListService.java
-Purpose: Business logic for lists.
-Content:
+```
+
+D) New Service
+
+- Path: shopping-cart/src/main/java/pk/ai/shopping_cart/service/ShoppingListService.java
+- Change summary: Business logic for list CRUD, item ops, stash cart, and transfer to cart.
+- New file:
+```java
 package pk.ai.shopping_cart.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.security.access.AccessDeniedException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
-import pk.ai.shopping_cart.dto.cart.AddToCartRequest;
 import pk.ai.shopping_cart.dto.cart.CartResponse;
 import pk.ai.shopping_cart.dto.list.*;
+import pk.ai.shopping_cart.entity.Cart;
+import pk.ai.shopping_cart.entity.CartItem;
 import pk.ai.shopping_cart.entity.Product;
 import pk.ai.shopping_cart.entity.ShoppingList;
 import pk.ai.shopping_cart.entity.ShoppingListItem;
+import pk.ai.shopping_cart.repository.CartRepository;
 import pk.ai.shopping_cart.repository.ProductRepository;
 import pk.ai.shopping_cart.repository.ShoppingListRepository;
 
 import java.time.LocalDateTime;
 import java.util.*;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 
 @Service
 @Slf4j
 @RequiredArgsConstructor
 public class ShoppingListService {
-    private final ShoppingListRepository listRepository;
+    private final ShoppingListRepository shoppingListRepository;
     private final ProductRepository productRepository;
+    private final CartRepository cartRepository;
     private final CartService cartService;
 
-    private static final int MAX_LISTS_PER_USER = 100;
-    private static final int MAX_ITEMS_PER_LIST = 500;
-    public static final String DEFAULT_SAVED_FOR_LATER = "Saved for later";
-
-    // CRUD
-
-    public ListResponse createList(String userId, ListCreateRequest request) {
-        long activeCount = listRepository.countByUserIdAndStatus(userId, ShoppingList.ListStatus.ACTIVE);
-        if (activeCount >= MAX_LISTS_PER_USER) {
-            throw new IllegalArgumentException("Max lists per user reached");
+    // Create a new list
+    public ShoppingListResponse createList(String userId, String name) {
+        log.info("Creating shopping list \'{}\' for user {}", name, userId);
+        if (shoppingListRepository.existsByUserIdAndName(userId, name)) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    org.springframework.http.HttpStatus.CONFLICT,
+                    "A list with this name already exists for the user");
         }
         ShoppingList list = ShoppingList.builder()
                 .userId(userId)
-                .name(request.getName().trim())
-                .status(ShoppingList.ListStatus.ACTIVE)
+                .name(name)
+                .status(ShoppingList.ShoppingListStatus.ACTIVE)
                 .items(new ArrayList<>())
                 .createdAt(LocalDateTime.now())
                 .updatedAt(LocalDateTime.now())
                 .build();
-        list = listRepository.save(list);
-        log.info("Created shopping list '{}' for user {}", list.getName(), userId);
-        return toListResponse(list, Map.of());
+        list = shoppingListRepository.save(list);
+        return toResponse(list);
     }
 
-    public List<ListResponse> getLists(String userId) {
-        return listRepository.findByUserIdAndStatus(userId, ShoppingList.ListStatus.ACTIVE)
-                .stream()
-                .map(l -> toListResponse(l, Map.of())) // metadata only (no availability check)
-                .collect(Collectors.toList());
-    }
-
-    public ListResponse getList(String userId, String listId) {
-        ShoppingList list = listRepository.findById(listId)
-                .orElseThrow(() -> new NoSuchElementException("List not found: " + listId));
-        ensureOwnership(userId, list);
-        // Batch load products to flag availability
-        Map<String, Product> productMap = productRepository.findAllById(
-                        list.getItems().stream().map(ShoppingListItem::getProductId).collect(Collectors.toSet()))
-                .stream()
-                .collect(Collectors.toMap(Product::getId, Function.identity()));
-        return toListResponse(list, productMap);
-    }
-
-    public ListResponse renameList(String userId, String listId, ListRenameRequest request) {
-        ShoppingList list = listRepository.findById(listId)
-                .orElseThrow(() -> new NoSuchElementException("List not found: " + listId));
-        ensureOwnership(userId, list);
-        list.setName(request.getName().trim());
-        list.setUpdatedAt(LocalDateTime.now());
-        list = listRepository.save(list);
-        log.info("Renamed list {} to '{}' for user {}", listId, list.getName(), userId);
-        return toListResponse(list, Map.of());
-    }
-
-    public void deleteList(String userId, String listId) {
-        ShoppingList list = listRepository.findById(listId)
-                .orElseThrow(() -> new NoSuchElementException("List not found: " + listId));
-        ensureOwnership(userId, list);
-        listRepository.deleteById(listId);
-        log.info("Deleted list {} for user {}", listId, userId);
-    }
-
-    // Item operations
-
-    public ListResponse addItem(String userId, String listId, ListItemRequest request) {
-        ShoppingList list = getOwnedList(userId, listId);
-        if (list.getItems().size() >= MAX_ITEMS_PER_LIST) {
-            throw new IllegalArgumentException("Max items per list reached");
+    // Rename list
+    public ShoppingListResponse renameList(String userId, String listId, String newName) {
+        ShoppingList list = getListEntity(userId, listId);
+        if (!list.getName().equals(newName) && shoppingListRepository.existsByUserIdAndName(userId, newName)) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    org.springframework.http.HttpStatus.CONFLICT,
+                    "Another list with this name already exists");
         }
-        Product product = productRepository.findById(request.getProductId())
-                .orElseThrow(() -> new NoSuchElementException("Product not found: " + request.getProductId()));
+        log.info("Renaming shopping list {} to \'{}\' for user {}", listId, newName, userId);
+        list.setName(newName);
+        list.setUpdatedAt(LocalDateTime.now());
+        list = shoppingListRepository.save(list);
+        return toResponse(list);
+    }
+
+    // Delete list
+    public void deleteList(String userId, String listId) {
+        ShoppingList list = getListEntity(userId, listId);
+        log.info("Deleting shopping list {} for user {}", listId, userId);
+        shoppingListRepository.deleteByIdAndUserId(list.getId(), userId);
+    }
+
+    // Get list by id
+    public ShoppingListResponse getList(String userId, String listId) {
+        return toResponse(getListEntity(userId, listId));
+    }
+
+    // List all lists (paginated)
+    public List<ShoppingListResponse> getLists(String userId, int page, int size, org.springframework.http.HttpHeaders outHeaders) {
+        Page<ShoppingList> p = shoppingListRepository.findByUserId(userId, PageRequest.of(page, size));
+        outHeaders.add("X-Total-Count", String.valueOf(p.getTotalElements()));
+        return p.getContent().stream().map(this::toResponse).collect(Collectors.toList());
+    }
+
+    // Add item to list (product must exist; active/stock not required for list)
+    public ShoppingListResponse addItem(String userId, String listId, String productId, int quantity) {
+        ShoppingList list = getListEntity(userId, listId);
+        Product product = productRepository.findById(productId)
+                .orElseThrow(() -> new org.springframework.web.server.ResponseStatusException(
+                        org.springframework.http.HttpStatus.NOT_FOUND,
+                        "Product not found: " + productId));
+
         ShoppingListItem item = ShoppingListItem.builder()
                 .productId(product.getId())
                 .productSku(product.getSku())
                 .productName(product.getName())
-                .unitPrice(product.getPrice())
+                .unitPrice(product.getPrice())  // snapshot
                 .currency(product.getCurrency())
+                .quantity(quantity)
                 .productImageUrl(product.getImageUrl())
-                .quantity(request.getQuantity())
+                .addedAt(LocalDateTime.now())
+                .updatedAt(LocalDateTime.now())
                 .build();
-        list.addOrIncrementItem(item);
-        list = listRepository.save(list);
-        return toListResponse(list, Map.of());
+        list.addOrIncreaseItem(item);
+        list = shoppingListRepository.save(list);
+        return toResponse(list);
     }
 
-    public ListResponse updateItem(String userId, String listId, ListItemRequest request) {
-        ShoppingList list = getOwnedList(userId, listId);
-        boolean updated = list.updateItemQuantity(request.getProductId(), request.getQuantity());
-        if (!updated) throw new NoSuchElementException("Product not in list: " + request.getProductId());
-        list = listRepository.save(list);
-        return toListResponse(list, Map.of());
+    // Update item quantity
+    public ShoppingListResponse updateItem(String userId, String listId, String productId, int quantity) {
+        ShoppingList list = getListEntity(userId, listId);
+        boolean updated = list.updateItemQuantity(productId, quantity);
+        if (!updated) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    org.springframework.http.HttpStatus.NOT_FOUND,
+                    "Product not found in list: " + productId);
+        }
+        list = shoppingListRepository.save(list);
+        return toResponse(list);
     }
 
-    public ListResponse removeItem(String userId, String listId, String productId) {
-        ShoppingList list = getOwnedList(userId, listId);
+    // Remove item
+    public ShoppingListResponse removeItem(String userId, String listId, String productId) {
+        ShoppingList list = getListEntity(userId, listId);
         boolean removed = list.removeItem(productId);
-        if (!removed) throw new NoSuchElementException("Product not in list: " + productId);
-        list = listRepository.save(list);
-        return toListResponse(list, Map.of());
+        if (!removed) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    org.springframework.http.HttpStatus.NOT_FOUND,
+                    "Product not found in list: " + productId);
+        }
+        list = shoppingListRepository.save(list);
+        return toResponse(list);
     }
 
-    // Move to cart
-
-    public MoveToCartResponse moveToCart(String userId, String listId, MoveToCartRequest request) {
-        ShoppingList list = getOwnedList(userId, listId);
-
-        Map<String, Integer> reqMap = request.getItems().stream()
-                .collect(Collectors.toMap(MoveToCartRequest.ItemQuantity::getProductId,
-                        MoveToCartRequest.ItemQuantity::getQuantity));
-
-        List<MoveToCartResponse.ItemResult> moved = new ArrayList<>();
-        List<MoveToCartResponse.ItemResult> failed = new ArrayList<>();
-
-        for (MoveToCartRequest.ItemQuantity iq : request.getItems()) {
-            String pid = iq.getProductId();
-            int qty = Optional.ofNullable(iq.getQuantity()).orElse(0);
-            Optional<ShoppingListItem> itemOpt = list.findItemByProductId(pid);
-            if (itemOpt.isEmpty()) {
-                failed.add(MoveToCartResponse.ItemResult.builder()
-                        .productId(pid).requestedQuantity(qty).movedQuantity(0)
-                        .status("FAILED").reason("not-in-list").build());
-                continue;
-            }
-            // Validate availability at move time
-            Product product = productRepository.findById(pid)
-                    .orElse(null);
-            if (product == null) {
-                failed.add(MoveToCartResponse.ItemResult.builder()
-                        .productId(pid).requestedQuantity(qty).movedQuantity(0)
-                        .status("FAILED").reason("not-found").build());
-                continue;
-            }
-            if (!product.isAvailable()) {
-                failed.add(MoveToCartResponse.ItemResult.builder()
-                        .productId(pid).requestedQuantity(qty).movedQuantity(0)
-                        .status("FAILED").reason("unavailable").build());
-                continue;
-            }
-            if (!product.hasStock(qty)) {
-                failed.add(MoveToCartResponse.ItemResult.builder()
-                        .productId(pid).requestedQuantity(qty).movedQuantity(0)
-                        .status("FAILED").reason("insufficient-stock").build());
-                continue;
-            }
-            // Add to cart
-            CartResponse cartSnapshot = cartService.addToCart(userId, AddToCartRequest.builder()
-                    .productId(pid).quantity(qty).build());
-            moved.add(MoveToCartResponse.ItemResult.builder()
-                    .productId(pid).requestedQuantity(qty).movedQuantity(qty)
-                    .status("MOVED").reason(null).build());
-
-            // Decrement from list
-            ShoppingListItem item = itemOpt.get();
-            int remaining = item.getQuantity() - qty;
-            if (remaining <= 0) {
-                list.removeItem(pid);
+    // Stash current cart into a list (move or copy)
+    public StashCartResponse stashCart(String userId, StashCartRequest request) {
+        if (request.getTargetListId() != null && request.getNewListName() != null) {
+            throw new org.springframework.web.server.ResponseStatusException(
+                    org.springframework.http.HttpStatus.BAD_REQUEST,
+                    "Provide either targetListId or newListName, not both");
+        }
+        Cart cart = cartService.getOrCreateCart(userId);
+        if (cart.isEmpty()) {
+            log.info("Cart is empty for user {}; nothing to stash", userId);
+            return StashCartResponse.builder()
+                    .success(true)
+                    .cartWasEmpty(true)
+                    .action("NONE")
+                    .list(null)
+                    .build();
+        }
+        ShoppingList target;
+        boolean created = false;
+        if (request.getTargetListId() != null) {
+            target = getListEntity(userId, request.getTargetListId());
+        } else {
+            String name = Optional.ofNullable(request.getNewListName()).orElse("My List");
+            if (shoppingListRepository.existsByUserIdAndName(userId, name)) {
+                target = shoppingListRepository.findByUserIdAndName(userId, name).get();
             } else {
-                item.updateQuantity(remaining);
+                target = ShoppingList.builder()
+                        .userId(userId)
+                        .name(name)
+                        .status(ShoppingList.ShoppingListStatus.ACTIVE)
+                        .items(new ArrayList<>())
+                        .createdAt(LocalDateTime.now())
+                        .updatedAt(LocalDateTime.now())
+                        .build();
+                created = true;
             }
         }
+        // Merge cart items into list
+        log.info("Stashing cart into list \'{}\' (created={}) for user {}", target.getName(), created, userId);
+        for (CartItem ci : cart.getItems()) {
+            ShoppingListItem sli = ShoppingListItem.builder()
+                    .productId(ci.getProductId())
+                    .productSku(ci.getProductSku())
+                    .productName(ci.getProductName())
+                    .unitPrice(ci.getUnitPrice())
+                    .currency(ci.getCurrency())
+                    .quantity(ci.getQuantity())
+                    .productImageUrl(ci.getProductImageUrl())
+                    .addedAt(LocalDateTime.now())
+                    .updatedAt(LocalDateTime.now())
+                    .build();
+            target.addOrIncreaseItem(sli);
+        }
+        target = shoppingListRepository.save(target);
 
-        list = listRepository.save(list);
-        // Return updated snapshots
-        CartResponse updatedCart = cartService.getCart(userId);
-        ListResponse updatedList = toListResponse(list, Map.of());
-        return MoveToCartResponse.builder()
-                .cart(updatedCart)
-                .list(updatedList)
-                .movedItems(moved)
-                .failedItems(failed)
+        if (!request.isKeepInCart()) {
+            cartService.clearCart(userId); // Move semantics
+        }
+
+        return StashCartResponse.builder()
+                .success(true)
+                .cartWasEmpty(false)
+                .action(request.isKeepInCart() ? "COPIED" : "MOVED")
+                .list(toResponse(target))
                 .build();
     }
 
-    // Helpers
-
-    public ShoppingList getOrCreateDefaultSavedForLater(String userId) {
-        return listRepository.findActiveByUserIdAndName(userId, DEFAULT_SAVED_FOR_LATER)
-                .orElseGet(() -> {
-                    ShoppingList l = ShoppingList.builder()
-                            .userId(userId)
-                            .name(DEFAULT_SAVED_FOR_LATER)
-                            .status(ShoppingList.ListStatus.ACTIVE)
-                            .createdAt(LocalDateTime.now())
-                            .updatedAt(LocalDateTime.now())
-                            .items(new ArrayList<>())
-                            .build();
-                    return listRepository.save(l);
-                });
-    }
-
-    private ShoppingList getOwnedList(String userId, String listId) {
-        ShoppingList list = listRepository.findById(listId)
-                .orElseThrow(() -> new NoSuchElementException("List not found: " + listId));
-        ensureOwnership(userId, list);
-        return list;
-    }
-
-    private void ensureOwnership(String userId, ShoppingList list) {
-        if (!Objects.equals(list.getUserId(), userId)) {
-            throw new AccessDeniedException("Forbidden: list not owned by user");
-        }
-    }
-
-    private ListResponse toListResponse(ShoppingList list, Map<String, ?> productMapOrEmpty) {
-        Map<String, Product> productMap = productMapOrEmpty instanceof Map<?, ?>
-                ? (Map<String, Product>) productMapOrEmpty : Map.of();
-
-        List<ListItemResponse> items = list.getItems().stream().map(i -> {
-            Product p = productMap.get(i.getProductId());
-            boolean available = p != null && p.isAvailable();
-            String status = p != null && p.getStatus() != null ? p.getStatus().toString() : null;
-            Integer stock = p != null ? p.getStockQuantity() : null;
-            return ListItemResponse.builder()
-                    .productId(i.getProductId())
-                    .productSku(i.getProductSku())
-                    .productName(i.getProductName())
-                    .productImageUrl(i.getProductImageUrl())
-                    .unitPrice(i.getUnitPrice())
-                    .currency(i.getCurrency())
-                    .quantity(i.getQuantity())
-                    .totalPrice(i.getTotalPrice())
-                    .addedAt(i.getAddedAt())
-                    .updatedAt(i.getUpdatedAt())
-                    .available(available)
-                    .productStatus(status)
-                    .currentStockQuantity(stock)
+    // Transfer list into cart (with stock checks and partial failures)
+    public TransferToCartResponse transferToCart(String userId, String listId, boolean overwriteQuantities) {
+        ShoppingList list = getListEntity(userId, listId);
+        if (list.isEmpty()) {
+            CartResponse cartResp = cartService.getCart(userId);
+            return TransferToCartResponse.builder()
+                    .cart(cartResp)
+                    .failedItems(Collections.emptyList())
                     .build();
-        }).collect(Collectors.toList());
+        }
+        // Batch fetch products for stock/active checks
+        List<String> ids = list.getItems().stream().map(ShoppingListItem::getProductId).distinct().toList();
+        Map<String, Product> productsById = new HashMap<>();
+        productRepository.findAllById(ids).forEach(p -> productsById.put(p.getId(), p));
 
-        return ListResponse.builder()
+        List<TransferToCartResponse.FailedItem> failures = new ArrayList<>();
+        Cart cart = cartService.getOrCreateCart(userId);
+
+        for (ShoppingListItem item : list.getItems()) {
+            Product p = productsById.get(item.getProductId());
+            if (p == null) {
+                failures.add(TransferToCartResponse.FailedItem.builder()
+                        .productId(item.getProductId()).reason("NOT_FOUND").build());
+                continue;
+            }
+            if (!p.isAvailable()) {
+                failures.add(TransferToCartResponse.FailedItem.builder()
+                        .productId(item.getProductId()).reason("PRODUCT_INACTIVE").build());
+                continue;
+            }
+            if (!p.hasStock(item.getQuantity())) {
+                failures.add(TransferToCartResponse.FailedItem.builder()
+                        .productId(item.getProductId()).reason("OUT_OF_STOCK").build());
+                continue;
+            }
+
+            // Apply to cart with overwrite or merge semantics using current price/currency
+            Optional<CartItem> existing = cart.findItemByProductId(p.getId());
+            if (existing.isPresent()) {
+                int newQty = overwriteQuantities ? item.getQuantity() : existing.get().getQuantity() + item.getQuantity();
+                existing.get().updateQuantity(newQty);
+                existing.get().setUpdatedAt(LocalDateTime.now());
+                // Update snapshot fields to current product state when transferring (price may change)
+                existing.get().setUnitPrice(p.getPrice());
+                existing.get().setCurrency(p.getCurrency());
+                existing.get().setProductName(p.getName());
+                existing.get().setProductSku(p.getSku());
+                existing.get().setProductImageUrl(p.getImageUrl());
+            } else {
+                CartItem ci = CartItem.builder()
+                        .productId(p.getId())
+                        .productSku(p.getSku())
+                        .productName(p.getName())
+                        .unitPrice(p.getPrice())
+                        .currency(p.getCurrency())
+                        .quantity(item.getQuantity())
+                        .productImageUrl(p.getImageUrl())
+                        .addedAt(LocalDateTime.now())
+                        .updatedAt(LocalDateTime.now())
+                        .build();
+                cart.addItem(ci);
+            }
+        }
+        // Extend expiration to be consistent with addToCart activity
+        cart.setExpiresAt(LocalDateTime.now().plusDays(7));
+        cart = cartRepository.save(cart);
+
+        CartResponse cartResp = cartService.getCart(userId);
+        return TransferToCartResponse.builder()
+                .cart(cartResp)
+                .failedItems(failures)
+                .build();
+    }
+
+    private ShoppingList getListEntity(String userId, String listId) {
+        return shoppingListRepository.findByIdAndUserId(listId, userId)
+                .orElseThrow(() -> new org.springframework.web.server.ResponseStatusException(
+                        org.springframework.http.HttpStatus.NOT_FOUND, "List not found"));
+    }
+
+    private ShoppingListResponse toResponse(ShoppingList list) {
+        List<ShoppingListItemResponse> items = list.getItems().stream().map(i -> ShoppingListItemResponse.builder()
+                        .productId(i.getProductId())
+                        .productSku(i.getProductSku())
+                        .productName(i.getProductName())
+                        .productImageUrl(i.getProductImageUrl())
+                        .unitPrice(i.getUnitPrice())
+                        .currency(i.getCurrency())
+                        .quantity(i.getQuantity())
+                        .addedAt(i.getAddedAt())
+                        .updatedAt(i.getUpdatedAt())
+                        .build())
+                .collect(Collectors.toList());
+        return ShoppingListResponse.builder()
                 .id(list.getId())
                 .userId(list.getUserId())
                 .name(list.getName())
-                .status(list.getStatus().toString())
                 .items(items)
                 .totalItems(list.getTotalItems())
-                .totalPrice(list.getTotalPrice())
+                .status(list.getStatus() != null ? list.getStatus().name() : "ACTIVE")
                 .createdAt(list.getCreatedAt())
                 .updatedAt(list.getUpdatedAt())
+                .empty(list.isEmpty())
                 .build();
     }
 }
-New file: shopping-cart/src/main/java/pk/ai/shopping_cart/controller/ShoppingListController.java
-Purpose: REST API for lists.
-Content:
+```
+
+E) New Controller
+
+- Path: shopping-cart/src/main/java/pk/ai/shopping_cart/controller/ShoppingListController.java
+- Change summary: REST endpoints for /api/lists and POST /api/cart/stash. Scoped by userId via @RequestParam (consistent with existing pattern). Includes basic OpenAPI annotations.
+- New file:
+```java
 package pk.ai.shopping_cart.controller;
 
+import io.swagger.v3.oas.annotations.Operation;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.AccessDeniedException;
+import org.springframework.http.*;
 import org.springframework.web.bind.annotation.*;
 import pk.ai.shopping_cart.dto.list.*;
 import pk.ai.shopping_cart.service.ShoppingListService;
 
 import java.util.List;
 
-@RestController
-@RequestMapping("/api/lists")
 @Slf4j
+@RestController
+@RequestMapping("/api")
 @RequiredArgsConstructor
 public class ShoppingListController {
 
     private final ShoppingListService shoppingListService;
 
-    @Value("${feature.shoppingLists.enabled:true}")
-    private boolean featureEnabled;
+    // ===== Lists CRUD =====
 
-    private void checkFeature() {
-        if (!featureEnabled) {
-            throw new AccessDeniedException("Feature disabled");
-        }
+    @Operation(summary = "Create a new shopping list")
+    @PostMapping("/lists")
+    public ResponseEntity<ShoppingListResponse> createList(
+            @RequestParam String userId,
+            @Valid @RequestBody CreateShoppingListRequest request) {
+        ShoppingListResponse resp = shoppingListService.createList(userId, request.getName());
+        return ResponseEntity.status(HttpStatus.CREATED).body(resp);
     }
 
-    @PostMapping
-    public ResponseEntity<ListResponse> createList(@RequestParam String userId,
-                                                   @Valid @RequestBody ListCreateRequest request) {
-        checkFeature();
-        log.info("Creating list '{}' for user {}", request.getName(), userId);
-        return ResponseEntity.ok(shoppingListService.createList(userId, request));
+    @Operation(summary = "Get shopping lists (paginated)")
+    @GetMapping("/lists")
+    public ResponseEntity<List<ShoppingListResponse>> getLists(
+            @RequestParam String userId,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        HttpHeaders headers = new HttpHeaders();
+        List<ShoppingListResponse> resp = shoppingListService.getLists(userId, page, size, headers);
+        return new ResponseEntity<>(resp, headers, HttpStatus.OK);
     }
 
-    @GetMapping
-    public ResponseEntity<List<ListResponse>> getLists(@RequestParam String userId) {
-        checkFeature();
-        log.debug("Getting lists for user {}", userId);
-        return ResponseEntity.ok(shoppingListService.getLists(userId));
-    }
-
-    @GetMapping("/{listId}")
-    public ResponseEntity<ListResponse> getList(@RequestParam String userId, @PathVariable String listId) {
-        checkFeature();
-        log.debug("Getting list {} for user {}", listId, userId);
+    @Operation(summary = "Get shopping list by id")
+    @GetMapping("/lists/{listId}")
+    public ResponseEntity<ShoppingListResponse> getList(
+            @RequestParam String userId,
+            @PathVariable String listId) {
         return ResponseEntity.ok(shoppingListService.getList(userId, listId));
     }
 
-    @PatchMapping("/{listId}")
-    public ResponseEntity<ListResponse> renameList(@RequestParam String userId, @PathVariable String listId,
-                                                   @Valid @RequestBody ListRenameRequest request) {
-        checkFeature();
-        log.info("Renaming list {} for user {}", listId, userId);
-        return ResponseEntity.ok(shoppingListService.renameList(userId, listId, request));
+    @Operation(summary = "Rename shopping list")
+    @PutMapping("/lists/{listId}")
+    public ResponseEntity<ShoppingListResponse> renameList(
+            @RequestParam String userId,
+            @PathVariable String listId,
+            @Valid @RequestBody UpdateShoppingListRequest request) {
+        return ResponseEntity.ok(shoppingListService.renameList(userId, listId, request.getName()));
     }
 
-    @DeleteMapping("/{listId}")
-    public ResponseEntity<Void> deleteList(@RequestParam String userId, @PathVariable String listId) {
-        checkFeature();
-        log.info("Deleting list {} for user {}", listId, userId);
+    @Operation(summary = "Delete shopping list")
+    @DeleteMapping("/lists/{listId}")
+    public ResponseEntity<Void> deleteList(
+            @RequestParam String userId,
+            @PathVariable String listId) {
         shoppingListService.deleteList(userId, listId);
         return ResponseEntity.noContent().build();
     }
 
-    @PostMapping("/{listId}/items")
-    public ResponseEntity<ListResponse> addItem(@RequestParam String userId, @PathVariable String listId,
-                                                @Valid @RequestBody ListItemRequest request) {
-        checkFeature();
-        log.debug("Adding item {} to list {} for user {}", request.getProductId(), listId, userId);
-        return ResponseEntity.ok(shoppingListService.addItem(userId, listId, request));
+    // ===== List Items =====
+
+    @Operation(summary = "Add item to list (increase if exists)")
+    @PostMapping("/lists/{listId}/items")
+    public ResponseEntity<ShoppingListResponse> addItem(
+            @RequestParam String userId,
+            @PathVariable String listId,
+            @Valid @RequestBody AddToShoppingListRequest request) {
+        return ResponseEntity.ok(shoppingListService.addItem(userId, listId, request.getProductId(), request.getQuantity()));
     }
 
-    @PutMapping("/{listId}/items")
-    public ResponseEntity<ListResponse> updateItem(@RequestParam String userId, @PathVariable String listId,
-                                                   @Valid @RequestBody ListItemRequest request) {
-        checkFeature();
-        log.debug("Updating item {} in list {} for user {}", request.getProductId(), listId, userId);
-        return ResponseEntity.ok(shoppingListService.updateItem(userId, listId, request));
+    @Operation(summary = "Update item quantity in a list")
+    @PutMapping("/lists/{listId}/items")
+    public ResponseEntity<ShoppingListResponse> updateItem(
+            @RequestParam String userId,
+            @PathVariable String listId,
+            @Valid @RequestBody UpdateShoppingListItemRequest request) {
+        return ResponseEntity.ok(shoppingListService.updateItem(userId, listId, request.getProductId(), request.getQuantity()));
     }
 
-    @DeleteMapping("/{listId}/items/{productId}")
-    public ResponseEntity<ListResponse> removeItem(@RequestParam String userId, @PathVariable String listId,
-                                                   @PathVariable String productId) {
-        checkFeature();
-        log.debug("Removing item {} from list {} for user {}", productId, listId, userId);
+    @Operation(summary = "Remove item from list")
+    @DeleteMapping("/lists/{listId}/items/{productId}")
+    public ResponseEntity<ShoppingListResponse> removeItem(
+            @RequestParam String userId,
+            @PathVariable String listId,
+            @PathVariable String productId) {
         return ResponseEntity.ok(shoppingListService.removeItem(userId, listId, productId));
     }
 
-    @PostMapping("/{listId}/move-to-cart")
-    public ResponseEntity<MoveToCartResponse> moveToCart(@RequestParam String userId, @PathVariable String listId,
-                                                         @Valid @RequestBody MoveToCartRequest request) {
-        checkFeature();
-        log.info("Moving items from list {} to cart for user {}", listId, userId);
-        return ResponseEntity.ok(shoppingListService.moveToCart(userId, listId, request));
+    // ===== Stash Cart =====
+
+    @Operation(summary = "Stash current cart into a shopping list (copy or move)")
+    @PostMapping("/cart/stash")
+    public ResponseEntity<StashCartResponse> stashCart(
+            @RequestParam String userId,
+            @Valid @RequestBody StashCartRequest request) {
+        return ResponseEntity.ok(shoppingListService.stashCart(userId, request));
+    }
+
+    // ===== Transfer List to Cart =====
+
+    @Operation(summary = "Transfer list items into active cart")
+    @PostMapping("/lists/{listId}/transfer-to-cart")
+    public ResponseEntity<TransferToCartResponse> transferToCart(
+            @RequestParam String userId,
+            @PathVariable String listId,
+            @Valid @RequestBody TransferListToCartRequest request) {
+        TransferToCartResponse resp = shoppingListService.transferToCart(userId, listId, request.isOverwriteQuantities());
+        return ResponseEntity.ok(resp);
     }
 }
-Modify file: shopping-cart/src/main/java/pk/ai/shopping_cart/service/CartService.java
-Change summary: Add clearCart, and helper methods for later stories (not yet exposed here). For Story 1, no changes required; but we’ll add helper signature for move-to-cart to reuse.
-Diff (only add method signature comment to reference move-to-cart is already using addToCart):
+```
+
+F) Modify CartService to add clearCart support (also used by Story 2)
+
+- Path: shopping-cart/src/main/java/pk/ai/shopping_cart/service/CartService.java
+- Change summary: Add clearCart(userId) and public helper to access Cart DTO after saving.
+- Diff:
+```diff
 --- a/shopping-cart/src/main/java/pk/ai/shopping_cart/service/CartService.java
 +++ b/shopping-cart/src/main/java/pk/ai/shopping_cart/service/CartService.java
-@@ -165,3 +165,26 @@ public class CartService {
+@@ -108,6 +108,29 @@ public class CartService {
+         return convertToCartResponse(cart);
      }
- }
-+
 +    /**
-+     * Clear all items from user's active cart.
-+     * Added for future clear-cart endpoint (Story 3).
++     * Clear the active cart for user (idempotent)
 +     */
-+    public CartResponse clearCartInternal(String userId) {
++    public CartResponse clearCart(String userId) {
++        log.info("Clearing cart for user {}", userId);
 +        Cart cart = getOrCreateCart(userId);
++        // Preserve metadata: id, status ACTIVE, expiresAt unchanged
 +        cart.clear();
 +        cart.setUpdatedAt(java.time.LocalDateTime.now());
-+        cartRepository.save(cart);
++        cart = cartRepository.save(cart);
++        log.debug("Cleared cart {} for user {}", cart.getId(), userId);
 +        return convertToCartResponse(cart);
 +    }
-Rationale: Prepare for clear-cart logic reuse across stories. Validation: Builds and compiles; no endpoint yet in Story 1.
+```
+
+G) No change to SecurityConfiguration needed; new endpoints are authenticated by default.
+
+H) API Documentation (OpenAPI) will be generated by springdoc from annotations.
+
 2.3 Config & Secrets
- New property feature.shoppingLists.enabled (default true). Can be overridden per environment.
- spring.data.mongodb.auto-index-creation=true ensures @Indexed fields create indexes automatically. For prod, coordinate with DBAs if necessary.
+- [ ] No new secrets required.
+- [ ] Optional feature flag (not implemented in this patch to keep scope tight). If needed later:
+  - Property: features.shopping-lists.enabled=true
+  - Use @ConditionalOnProperty if we decide to gate controllers/services.
+
 2.4 Data & Migrations
- Forward migration: No manual script; rely on Spring Data auto-index creation for shopping_lists.userId and status indexes via @Indexed.
- Backward: Entities are additive; safe to roll back app without DB changes.
- Indexes expected: shopping_lists.userId (single), shopping_lists.status (single). With auto-index enabled, created at startup.
+- [ ] Indexes
+  - Added @CompoundIndex unique (userId, name) on ShoppingList. Spring Data will ensure this index on startup.
+  - Indexed userId and name for filtering.
+- [ ] Forward migration
+  - No manual script; allow Spring Data to create indexes. For safety on existing envs, verify using Mongo shell:
+    - db.shopping_lists.createIndex({userId:1, name:1}, {unique:true, name:"uid_name_unique"})
+    - db.shopping_lists.createIndex({userId:1})
+- [ ] Rollback
+  - Safe to drop the collection or indices if needed:
+    - db.shopping_lists.dropIndex("uid_name_unique")
+    - db.shopping_lists.drop()
+
 2.5 Feature Flags / Kill Switch
- Flag: feature.shoppingLists.enabled (boolean, default true).
- Scope: ShoppingListController endpoints gated; if false, AccessDeniedException thrown (surfacing 403).
- Rollout: Start enabled in local/dev; toggle off in prod if needed.
- Removal plan: Remove flag after 2 stable releases.
+- [ ] None introduced now. If instability observed, we can add a property-gated @ConditionalOnProperty on ShoppingListController and ShoppingListService.
+
 2.6 Observability
- Logs:
-INFO: Create/Rename/Delete list, move-to-cart summary.
-DEBUG: userId, listId, productIds, quantities.
- Metrics: (optional for v1)
-shopping_list.create.count (counter, labels: result)
-shopping_list.move_to_cart.count (counter, labels: result)
- Tracing: Span names
-ShoppingListService.createList, .moveToCart
- Alerts: None required for v1.
+- [ ] Logs
+  - Info: list create/rename/delete, stash, transfer.
+  - Debug: item-level add/update/remove, failure reasons.
+  - Sample: "Stashing cart into list \'Party supplies\' (created=true) for user U123"
+- [ ] Metrics (Micrometer) – optional improvement later:
+  - counter: shopping_list.created
+  - counter: shopping_list.stash.operations
+  - counter: shopping_list.transfer.operations
+  - counter: shopping_list.transfer.failed_items (tag reason)
+- [ ] Tracing
+  - Span names: ShoppingListService.stashCart, ShoppingListService.transferToCart
+
 2.7 Performance & Resilience
- Batch product lookup on GET /api/lists/{id} using findAllById.
- Move-to-cart loops items; each item calls CartService.addToCart (multiple writes). Acceptable for small batches.
+- [ ] Batch product fetch using findAllById for transfer; single cart save at end of transfer reduces writes.
+- [ ] Pagination on list retrieval.
+- [ ] No retries added; all operations are single-writes to MongoDB.
+
 2.8 Security & Compliance
- Auth: endpoints authenticated by default.
- Authz: Ensure list.userId == userId param; throw AccessDeniedException on mismatch (403).
- Input validation: DTO constraints. Max lists/items enforced in service.
- PII: Avoid logging emails or sensitive info; only IDs and counts.
-Testing Plan (map directly to acceptance criteria)
-Unit tests (JUnit 5)
-Class: ShoppingListServiceTest
-testCreateList_success_whenValidName [AC1]
-GIVEN userId; WHEN createList; THEN status ACTIVE, itemCount 0.
-testGetLists_returnsOnlyUserLists [AC2]
-testRenameList_updatesNameAndTimestamp [AC3]
-testDeleteList_removesDocument [AC4]
-testAddItem_incrementsWhenDuplicate [AC5]
-testUpdateItemQuantity_updatesCount [AC6]
-testRemoveItem_removesFromList [AC7]
-testMoveToCart_partialSuccess [AC8]: mock product repo to return available/unavailable; assert moved/failed arrays; cart updated via spying CartService (or integration slice).
-testGetList_flagsUnavailable [AC9]: create product inactive; assert available=false in response.
-testOwnership_forbidden [AC10]: ensure AccessDeniedException thrown.
-Integration tests
-Class: ShoppingListControllerIT
-Use @SpringBootTest with embedded Mongo or testcontainers; authenticate via mock filter assumed; pass userId param.
-Test endpoints for CRUD and move-to-cart.
-Test data seeding
-Use ProductService.createSampleProducts() in @BeforeEach or dedicated seeder.
-Cleanup
-Remove created lists/products after each test to maintain isolation.
-Manual Verification Checklist (QA Playbook)
-Create a list:
-curl -X POST "http://localhost:8080/api/lists?userId=U1" -H "Content-Type: application/json" -d '{"name":"Back-to-school"}'
-Expect: 200 with id, name, status ACTIVE, totalItems 0.
-List my lists:
-curl "http://localhost:8080/api/lists?userId=U1"
-Expect: array with created list.
-Rename:
-curl -X PATCH "http://localhost:8080/api/lists/{listId}?userId=U1" -H "Content-Type: application/json" -d '{"name":"BTS 2025"}'
-Add item:
-curl -X POST "http://localhost:8080/api/lists/{listId}/items?userId=U1" -H "Content-Type: application/json" -d '{"productId":"<PRODUCT_ID>","quantity":2}'
-Move to cart:
-curl -X POST "http://localhost:8080/api/lists/{listId}/move-to-cart?userId=U1" -H "Content-Type: application/json" -d '{"items":[{"productId":"<PRODUCT_ID>","quantity":1}]}'
-Expect movedItems with status MOVED, cart snapshot updated.
-CI/CD & DevOps
-Ensure Mongo is available in CI (use testcontainers or a Mongo service).
-No pipeline changes required; mvn clean verify should pass.
-Add environment property feature.shoppingLists.enabled controlling rollout.
-Rollback & Recovery
-Rollback app: git revert or redeploy previous version. DB is additive; no schema rollback needed.
-Feature flag: set feature.shoppingLists.enabled=false to disable endpoints quickly.
-Risks & Mitigations
-Availability checks causing load: Mitigated by batch fetch with findAllById.
-Ownership spoofing via userId param: Known risk; future story will derive userId from JWT.
-Partial failures on move-to-cart: Reported clearly in response; list/cart remain consistent.
-Pull Request Plan
-PR title: feat(lists): add Shopping List domain with CRUD and move-to-cart
-Description: Problem, approach, new endpoints, DTOs, tests summary, feature flag, risks, rollout.
-Reviewers: Backend lead, DB reviewer.
-Focus files: entity/ShoppingList*, service/ShoppingListService, controller/ShoppingListController, repository/ShoppingListRepository, DTOs, CartService additions.
-Commit Strategy
-chore(config): enable mongo auto-index and add shopping lists feature flag
-feat(entity): add ShoppingList and ShoppingListItem with indexes
-feat(repo): add ShoppingListRepository
-feat(dto): add list request/response DTOs
-feat(service): implement ShoppingListService CRUD and move-to-cart
-feat(controller): add ShoppingListController endpoints
-test: add unit and integration tests for lists
-Documentation Updates
-README: Add Shopping List section with endpoints and examples.
-API docs: Verify endpoints appear in springdoc at /swagger-ui.html.
-ADR: “ADR-00X Shopping Lists Domain” summarizing decisions.
-CHANGELOG: Added shopping lists feature under Added.
-Definition of Done (checklist)
- AC1–AC10 covered by endpoints and tests.
- Flag documented and defaulted to true.
- Telemetry logs at info/debug.
- Indexes created via auto-index.
- PR merged and release notes updated.
+- [ ] Data classification: product snapshots and list names are non-sensitive; userId is PII.
+- [ ] Input validation via @Valid and @NotBlank/@Positive annotations.
+- [ ] Authorization: endpoints require auth by default; user ownership enforced by findByIdAndUserId for every list operation and by requiring userId param. Assumption: userId will be sourced from JWT principal in a future story.
+- [ ] No secrets logged; no PII beyond userId in INFO logs.
+
+3) Testing Plan (map directly to acceptance criteria)
+- Unit tests
+  - Class: ShoppingListServiceTest
+    - testCreateList_conflictName_returns409
+      - GIVEN existing list name; WHEN createList; THEN throw ResponseStatusException 409. [AC-1 conflict]
+    - testAddItem_increasesQuantityWhenExists
+      - GIVEN list with P qty 2; WHEN addItem P qty 3; THEN total qty 5. [AC-2]
+    - testUpdateAndRemoveItem
+      - GIVEN list with P qty 3; WHEN update to 1; THEN qty 1; WHEN remove; THEN product absent. [AC-3]
+    - testStashCart_moveAndCopy
+      - GIVEN cart with items; WHEN stash newListName keepInCart=false; THEN list created, cart cleared. WHEN keepInCart=true; cart unchanged. [AC-4]
+    - testStashCart_conflictingParams_badRequest
+    - testStashCart_emptyCart_noListCreated
+    - testTransferToCart_mergeAndOverwrite
+      - GIVEN list items and cart items; WHEN overwrite=false THEN sum; WHEN true THEN replace. [AC-5]
+    - testTransferToCart_partialFailures
+      - GIVEN inactive/out-of-stock product; THEN failedItems list contains reasons. [AC-5]
+  - Class: CartServiceTest
+    - clearCart_idempotentAndPreservesMetadata [tie-in with Story 2; also supports stash move]
+- Integration tests (@SpringBootTest + Testcontainers Mongo optional if available)
+  - ShoppingListControllerIT
+    - create/get/paginate lists [AC-6]
+    - conflict on rename [AC-6]
+    - delete list returns 204 [AC-6]
+    - stash endpoint copies/moves [AC-4]
+    - transfer-to-cart returns cart and failed items [AC-5]
+- Manual/E2E steps included in section 4.
+
+4) Manual Verification Checklist (QA Playbook)
+- Seed products
+  - POST /api/products/sample
+- Create list
+  - curl -X POST "http://localhost:8080/api/lists?userId=U1" -H "Content-Type: application/json" -d \'{"name":"Weekly staples"}\'
+- Add item to list
+  - curl -X POST "http://localhost:8080/api/lists/{listId}/items?userId=U1" -H "Content-Type: application/json" -d \'{"productId":"<PRODUCT_ID>","quantity":3}\'
+- Update and remove
+  - PUT /api/lists/{listId}/items?userId=U1 body {"productId":"<PRODUCT_ID>","quantity":1}
+  - DELETE /api/lists/{listId}/items/<PRODUCT_ID>?userId=U1
+- Stash cart (move)
+  - Add items to cart via POST /api/cart/items?userId=U1; then:
+  - curl -X POST "http://localhost:8080/api/cart/stash?userId=U1" -H "Content-Type: application/json" -d \'{"newListName":"Party supplies","keepInCart":false}\'
+- Transfer list to cart
+  - curl -X POST "http://localhost:8080/api/lists/{listId}/transfer-to-cart?userId=U1" -H "Content-Type: application/json" -d \'{"overwriteQuantities":false}\'
+
+Expected:
+- 409 for duplicate list name
+- 400 for both targetListId and newListName
+- 200 with action=NONE when cart empty
+- TransferToCartResponse.failedItems populated when stock/inactive issues.
+
+5) CI/CD & DevOps
+- No pipeline changes required. Unit/integration tests will run with mvn test.
+- Ensure MongoDB available in CI or use embedded Mongo/Mock; if not available, mark integration tests to require profile.
+- Health checks unaffected.
+
+6) Rollback & Recovery
+- Since changes are additive: rollback by deploying previous artifact.
+- Data: shopping_lists collection can remain; it’s harmless. Indices do not break older versions.
+- If incident occurs, disable usage of new endpoints at API gateway or remove routes.
+
+7) Risks & Mitigations
+- Risk: Unauthorized list access via tampered userId param.
+  - Mitigation: Move to principal-derived userId soon; server-side scoping via findByIdAndUserId already enforced.
+- Risk: Storage growth due to many lists.
+  - Mitigation: Later enforce soft limit per user and cleanup policy.
+- Risk: Price drift between saved list and current price.
+  - Mitigation: We snapshot price in list; but transfer uses current price, which is correct; document behavior.
+
+8) Pull Request Plan
+- Title: feat(lists): shopping lists CRUD, stash cart, and transfer-to-cart with partial failures
+- Description:
+  - Problem: Users cannot save carts or manage lists.
+  - Approach: Add ShoppingList entity, endpoints, stash and transfer flows, partial failure handling.
+  - Scope: New entities, repo, service, controller; minor CartService addition.
+  - Screens/Logs: Include sample curl and responses; screenshots of Swagger UI.
+  - Risk: Ownership enforcement relies on userId param.
+  - Rollout: Additive; deploy safely. Verify with QA playbook.
+  - Checklist: Tests added, indices created, docs updated.
+- Reviewers: Backend lead, Security reviewer (ownership), DB reviewer (indices).
+- Focus files: ShoppingListService, ShoppingListController, entity/ShoppingList.java, repository/ShoppingListRepository.java, CartService diff.
+
+9) Commit Strategy
+- Commit 1: feat(entity): add ShoppingList and ShoppingListItem entities with indexes
+- Commit 2: feat(repo): add ShoppingListRepository with user-scoped methods
+- Commit 3: feat(dto): add DTOs for lists, stash, and transfer responses
+- Commit 4: feat(service): implement ShoppingListService (CRUD, stash, transfer)
+- Commit 5: feat(controller): add ShoppingListController endpoints and OpenAPI annotations
+- Commit 6: feat(cart): add CartService.clearCart for reuse; wire stash move
+- Commit 7: test: add unit tests for ShoppingListService and CartService clearCart
+
+10) Documentation Updates
+- README.md
+  - New section: Shopping Lists API overview, endpoints, request/response bodies.
+- API docs: Automatically available via /swagger-ui.html; ensure annotations are present.
+- ADR: ADR-000X ShoppingLists.md
+  - Title: Introduce Shopping Lists and Stash/Transfer Flows
+  - Summary: Add new aggregate, endpoints, index strategy, and behavior on price snapshots.
+
+11) Definition of Done (checklist)
+- [ ] AC-1: Creating list and 409 on duplicate name – covered by ShoppingListServiceTest and controller tests.
+- [ ] AC-2: Add/increase items – tests and manual checks via curl.
+- [ ] AC-3: Update/remove items – tests.
+- [ ] AC-4: Stash cart (copy/move), validation, empty cart – unit + integration tests.
+- [ ] AC-5: Transfer to cart with merge/overwrite and partial failures – tests verify failedItems.
+- [ ] AC-6: List/rename/delete with pagination – tests verify X-Total-Count and 204 delete.
+- [ ] Telemetry and logging added at info/debug.
+- [ ] Indices created and validated in Mongo.
+- [ ] Security: endpoints authenticated; ownership enforced.
+- [ ] No changes to existing cart endpoints’ schemas.
+
 Diagrams (Mermaid)
-Dependency graph
+
+- Dependency graph
+```mermaid
 graph TD
-  Controller[ShoppingListController] --> Service[ShoppingListService]
-  Service --> Repo[ShoppingListRepository]
-  Service --> ProductRepo[ProductRepository]
-  Service --> CartService
-  Repo --> Mongo[(MongoDB)]
-  ProductRepo --> Mongo
-  CartService --> CartRepo[CartRepository]
-  CartRepo --> Mongo
-System overview
-graph LR
-  Client -->|HTTP JWT| API[Spring Boot API]
-  API --> Lists[ShoppingListController]
-  API --> Cart[CartController]
-  Lists --> SLService[ShoppingListService]
-  SLService --> SLRepo[ShoppingListRepository]
-  SLService --> ProdRepo[ProductRepository]
-  SLService --> CartService
-  CartService --> CartRepo[CartRepository]
-  SLRepo --> Mongo[(MongoDB)]
-  CartRepo --> Mongo
-  ProdRepo --> Mongo
-Sequence: Move to cart
+  ProductRepository --> ShoppingListService
+  CartRepository --> ShoppingListService
+  ShoppingListRepository --> ShoppingListService
+  ShoppingListService --> ShoppingListController
+  CartService --> ShoppingListService
+  ShoppingListService -->|uses| dto_list[DTOs: list/*]
+  CartService --> CartController
+```
+
+- System overview with highlighted modules
+```mermaid
+flowchart LR
+  subgraph API Layer
+    ProductController
+    CartController
+    ShoppingListController:::highlight
+  end
+  subgraph Service Layer
+    ProductService
+    CartService
+    ShoppingListService:::highlight
+  end
+  subgraph Persistence
+    ProductRepository
+    CartRepository
+    ShoppingListRepository:::highlight
+  end
+  ProductController --> ProductService --> ProductRepository
+  CartController --> CartService --> CartRepository
+  ShoppingListController --> ShoppingListService --> ShoppingListRepository
+  ShoppingListService --> ProductRepository
+  ShoppingListService --> CartService
+classDef highlight fill:#e0ffe0,stroke:#2a7,stroke-width:2px;
+```
+
+- Sequence: Transfer list to cart
+```mermaid
 sequenceDiagram
   participant C as Client
-  participant LC as ShoppingListController
-  participant LS as ShoppingListService
+  participant Ctrl as ShoppingListController
+  participant S as ShoppingListService
   participant PR as ProductRepository
   participant CS as CartService
   participant CR as CartRepository
-  C->>LC: POST /api/lists/{listId}/move-to-cart
-  LC->>LS: moveToCart(userId, listId, items)
-  LS->>LS: getOwnedList(), validate ownership
-  LS->>PR: findById(productId)
-  PR-->>LS: Product
-  alt available & stock OK
-    LS->>CS: addToCart(userId, AddToCartRequest)
-    CS->>CR: save(cart)
-    CR-->>CS: cart
-    CS-->>LS: CartResponse
-    LS->>LS: decrement list item
-  else fail
-    LS->>LS: collect failure reason
-  end
-  LS->>CR: save(updated list)
-  CR-->>LS: list
-  LS->>CS: getCart(userId)
-  CS-->>LS: CartResponse
-  LS-->>LC: MoveToCartResponse
-  LC-->>C: 200 OK
 
-User Story 2: “Save for later” items from cart, and stash entire cart as a named list
-Design Outline (with trade-offs)
-Proposed approach
-Reuse Shopping List domain. Implement:
-CartController: new endpoints
-POST /api/cart/items/{productId}/save-for-later (moves item to “Saved for later”).
-POST /api/cart/stash (moves selected/all cart items to a target list).
-CartService: add methods saveItemForLater and stashCart orchestrating with ShoppingListService.
-DTOs for request/response (CartStashRequest, SaveForLaterResponse).
-Alternatives: Directly manipulate lists from CartController. Rejected to keep orchestration in services and maintain layering.
-Complexity/risks and mitigations
-Risk: Race on cart updates during stash.
-Mitigation: Reload cart before operations; process item-by-item; return partial success.
-Idempotency:
-Save-for-later increments list quantity when repeated; cart removal is idempotent since item absent yields no-op.
-Backward compatibility
-Additive endpoints. Guard behind feature.shoppingLists.enabled as well.
-Decision
-Place orchestration in CartService to keep controller thin and reuse logic for potential future flows.
-Step-by-Step Implementation Plan 2.1 Pre-work
- Continue in branch feature/shopping-lists-v1.
-2.2 Code Changes
-New DTOs: shopping-cart/src/main/java/pk/ai/shopping_cart/dto/cart/SaveForLaterResponse.java
-package pk.ai.shopping_cart.dto.cart;
+  C->>Ctrl: POST /api/lists/{listId}/transfer-to-cart
+  Ctrl->>S: transferToCart(userId, listId, overwrite)
+  S->>S: getListEntity(userId, listId)
+  S->>PR: findAllById(productIds)
+  PR-->>S: products
+  S->>CS: getOrCreateCart(userId)
+  CS-->>S: Cart
+  S->>CR: save(updated cart with merged items)
+  CR-->>S: Cart
+  S->>CS: getCart(userId)
+  CS-->>S: CartResponse
+  S-->>Ctrl: TransferToCartResponse(cart, failedItems)
+  Ctrl-->>C: 200 OK
+```
 
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
-import pk.ai.shopping_cart.dto.list.ListResponse;
+User Story 2: Customers can clear their shopping cart in a single action
 
-@Data
-@Builder
-@NoArgsConstructor
-@AllArgsConstructor
-public class SaveForLaterResponse {
-    private CartResponse cart;
-    private ListResponse list;
-}
-New DTO: shopping-cart/src/main/java/pk/ai/shopping_cart/dto/cart/CartStashRequest.java
-package pk.ai.shopping_cart.dto.cart;
+1) Design Outline (with trade-offs)
+- Proposed approach
+  - Add a new endpoint DELETE /api/cart to clear the active cart for a user. Add a new method clearCart(userId) in CartService that reuses existing getOrCreateCart, calls cart.clear(), updates updatedAt, and saves.
+- Complexity/risks and mitigations
+  - Risk: Clearing another user’s cart if userId param is misused. Mitigation: Short-term require auth and maintain server-side checks; long-term get userId from principal.
+- Backward compatibility
+  - Additive endpoint, no changes to existing add/update/remove item endpoints.
 
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+2) Step-by-Step Implementation Plan (JUNIOR-FRIENDLY CHECKLIST)
 
-import java.util.List;
+2.1 Pre-work
+- [ ] Use the same branch: feature/shopping-lists-and-stash
+- [ ] Build check: mvn -q clean test
 
-@Data
-@Builder
-@NoArgsConstructor
-@AllArgsConstructor
-public class CartStashRequest {
-    private String listId;     // optional target
-    private String listName;   // optional, default "Saved for later" if empty
-    private boolean all;       // if true, all items in cart
-    private List<String> productIds; // if not all, which items to move
-}
-Modify file: shopping-cart/src/main/java/pk/ai/shopping_cart/service/CartService.java
-Add saveForLater and stash methods.
-Diff:
---- a/shopping-cart/src/main/java/pk/ai/shopping_cart/service/CartService.java
-+++ b/shopping-cart/src/main/java/pk/ai/shopping_cart/service/CartService.java
-@@ -6,12 +6,17 @@ import pk.ai.shopping_cart.entity.Product;
- import pk.ai.shopping_cart.repository.CartRepository;
- import pk.ai.shopping_cart.repository.ProductRepository;
- import pk.ai.shopping_cart.dto.cart.*;
- import org.springframework.beans.factory.annotation.Autowired;
- import org.springframework.stereotype.Service;
- import lombok.extern.slf4j.Slf4j;
-+import org.springframework.beans.factory.annotation.Value;
-+import org.springframework.security.access.AccessDeniedException;
-+import pk.ai.shopping_cart.service.ShoppingListService;
-+import pk.ai.shopping_cart.dto.list.ListItemRequest;
-+import pk.ai.shopping_cart.dto.list.ListResponse;
- import java.math.BigDecimal;
- import java.time.LocalDateTime;
- import java.util.List;
- import java.util.Optional;
- import java.util.stream.Collectors;
- 
- @Service
- @Slf4j
- public class CartService {
-     @Autowired
-     private CartRepository cartRepository;
-     @Autowired
-     private ProductRepository productRepository;
-+    @Autowired
-+    private ShoppingListService shoppingListService;
-+    @Value("${feature.shoppingLists.enabled:true}")
-+    private boolean listsFeatureEnabled;
-@@
-     private CartResponse convertToCartItemResponse(CartItem item) {
-         return CartItemResponse.builder()
-                 .productId(item.getProductId())
-                 .productSku(item.getProductSku())
-                 .productName(item.getProductName())
-                 .productImageUrl(item.getProductImageUrl())
-                 .unitPrice(item.getUnitPrice())
-                 .currency(item.getCurrency())
-                 .quantity(item.getQuantity())
-                 .totalPrice(item.getTotalPrice())
-                 .addedAt(item.getAddedAt())
-                 .updatedAt(item.getUpdatedAt())
-                 .build();
-     }
- }
-+
-+    /**
-+     * Save a single cart item for later by moving it into the user's "Saved for later" list.
-+     */
-+    public SaveForLaterResponse saveItemForLater(String userId, String productId) {
-+        if (!listsFeatureEnabled) throw new AccessDeniedException("Feature disabled");
-+        Cart cart = cartRepository.findActiveCartByUserId(userId)
-+                .orElseThrow(() -> new RuntimeException("Cart not found for user: " + userId));
-+        Optional<CartItem> itemOpt = cart.findItemByProductId(productId);
-+        if (itemOpt.isEmpty()) {
-+            throw new RuntimeException("Product not found in cart: " + productId);
-+        }
-+        CartItem item = itemOpt.get();
-+        // Remove from cart
-+        cart.removeItem(productId);
-+        cartRepository.save(cart);
-+        // Add to Saved for later
-+        var savedList = shoppingListService.getOrCreateDefaultSavedForLater(userId);
-+        shoppingListService.addItem(userId, savedList.getId(),
-+                ListItemRequest.builder().productId(item.getProductId()).quantity(item.getQuantity()).build());
-+        // Return snapshots
-+        return SaveForLaterResponse.builder()
-+                .cart(convertToCartResponse(cart))
-+                .list(shoppingListService.getList(userId, savedList.getId()))
-+                .build();
-+    }
-+
-+    /**
-+     * Stash items from cart into a target list (by listId or listName). If 'all' is true, stash all items.
-+     */
-+    public SaveForLaterResponse stashCart(String userId, CartStashRequest request) {
-+        if (!listsFeatureEnabled) throw new AccessDeniedException("Feature disabled");
-+        Cart cart = getOrCreateCart(userId);
-+        if (cart.isEmpty()) {
-+            var savedList = (request.getListId() != null)
-+                    ? shoppingListService.getList(userId, request.getListId())
-+                    : shoppingListService.createList(userId,
-+                        new pk.ai.shopping_cart.dto.list.ListCreateRequest(
-+                                request.getListName() == null || request.getListName().isBlank()
-+                                        ? ShoppingListService.DEFAULT_SAVED_FOR_LATER
-+                                        : request.getListName()));
-+            return SaveForLaterResponse.builder()
-+                    .cart(convertToCartResponse(cart))
-+                    .list(savedList)
-+                    .build();
-+        }
-+        // Determine items to move
-+        List<CartItem> itemsToMove = cart.getItems();
-+        if (!request.isAll() && request.getProductIds() != null && !request.getProductIds().isEmpty()) {
-+            itemsToMove = cart.getItems().stream()
-+                    .filter(ci -> request.getProductIds().contains(ci.getProductId()))
-+                    .collect(Collectors.toList());
-+        }
-+        // Resolve target list
-+        String targetListId;
-+        if (request.getListId() != null && !request.getListId().isBlank()) {
-+            // Verify ownership
-+            targetListId = request.getListId();
-+            // Throws if not owned
-+            shoppingListService.getList(userId, targetListId);
-+        } else {
-+            String name = (request.getListName() == null || request.getListName().isBlank())
-+                    ? ShoppingListService.DEFAULT_SAVED_FOR_LATER : request.getListName();
-+            targetListId = shoppingListService
-+                    .getOrCreateDefaultSavedForLater(userId).getId();
-+            if (!name.equals(ShoppingListService.DEFAULT_SAVED_FOR_LATER)) {
-+                targetListId = shoppingListService.createList(userId,
-+                        new pk.ai.shopping_cart.dto.list.ListCreateRequest(name)).getId();
-+            }
-+        }
-+        // Move items
-+        for (CartItem ci : itemsToMove) {
-+            shoppingListService.addItem(userId, targetListId,
-+                    ListItemRequest.builder().productId(ci.getProductId()).quantity(ci.getQuantity()).build());
-+            cart.removeItem(ci.getProductId());
-+        }
-+        cartRepository.save(cart);
-+        return SaveForLaterResponse.builder()
-+                .cart(convertToCartResponse(cart))
-+                .list(shoppingListService.getList(userId, targetListId))
-+                .build();
-+    }
-Rationale: Implement save-for-later and stash orchestration. Validation: Build the project to ensure imports resolved.
-Modify file: shopping-cart/src/main/java/pk/ai/shopping_cart/controller/CartController.java
-Add endpoints for save-for-later and stash; add clear endpoint in Story 3 later.
-Diff:
+2.2 Code Changes (file-by-file)
+
+A) CartService was updated in User Story 1. No further change needed if the clearCart method is present (diff already added).
+
+B) CartController: add endpoint DELETE /api/cart
+
+- Path: shopping-cart/src/main/java/pk/ai/shopping_cart/controller/CartController.java
+- Change summary: New endpoint to clear the cart.
+- Diff:
+```diff
 --- a/shopping-cart/src/main/java/pk/ai/shopping_cart/controller/CartController.java
 +++ b/shopping-cart/src/main/java/pk/ai/shopping_cart/controller/CartController.java
-@@ -1,17 +1,23 @@
- package pk.ai.shopping_cart.controller;
- import pk.ai.shopping_cart.service.CartService;
- import pk.ai.shopping_cart.dto.cart.*;
- import org.springframework.beans.factory.annotation.Autowired;
- import org.springframework.http.ResponseEntity;
- import org.springframework.web.bind.annotation.*;
- import lombok.extern.slf4j.Slf4j;
- import jakarta.validation.Valid;
-+import org.springframework.beans.factory.annotation.Value;
-+import org.springframework.security.access.AccessDeniedException;
- /**
-  * REST controller for shopping cart operations
-  */
- @RestController
- @RequestMapping("/api/cart")
- @Slf4j
- public class CartController {
-     @Autowired
-     private CartService cartService;
-+    @Value("${feature.shoppingLists.enabled:true}")
-+    private boolean listsFeatureEnabled;
-+    private void checkListsFeature() { if (!listsFeatureEnabled) throw new AccessDeniedException("Feature disabled"); }
-@@
-     public ResponseEntity<CartResponse> getCart(@RequestParam String userId) {
-         log.debug("Getting cart for user: {}", userId);
-         CartResponse cart = cartService.getCart(userId);
-         return ResponseEntity.ok(cart);
-     }
-@@
-     public ResponseEntity<CartResponse> removeFromCart(
-             @RequestParam String userId,
-             @PathVariable String productId) {
-         log.debug("Removing item {} from cart for user: {}", productId, userId);
+@@ -57,4 +57,17 @@ public class CartController {
          CartResponse cart = cartService.removeFromCart(userId, productId);
          return ResponseEntity.ok(cart);
      }
 +
 +    /**
-+     * Save a single cart item for later into the default "Saved for later" list.
++     * Clear the active cart (idempotent)
 +     */
-+    @PostMapping("/items/{productId}/save-for-later")
-+    public ResponseEntity<SaveForLaterResponse> saveForLater(
-+            @RequestParam String userId,
-+            @PathVariable String productId) {
-+        checkListsFeature();
-+        log.info("Saving product {} for later for user {}", productId, userId);
-+        return ResponseEntity.ok(cartService.saveItemForLater(userId, productId));
-+    }
-+
-+    /**
-+     * Stash cart items into a target list (all or subset).
-+     */
-+    @PostMapping("/stash")
-+    public ResponseEntity<SaveForLaterResponse> stashCart(
-+            @RequestParam String userId,
-+            @Valid @RequestBody CartStashRequest request) {
-+        checkListsFeature();
-+        log.info("Stashing cart items for user {}", userId);
-+        return ResponseEntity.ok(cartService.stashCart(userId, request));
++    @DeleteMapping
++    public ResponseEntity<CartResponse> clearCart(@RequestParam String userId) {
++        log.info("Clearing cart for user: {}", userId);
++        CartResponse cart = cartService.clearCart(userId);
++        return ResponseEntity.ok(cart);
 +    }
  }
+```
+
 2.3 Config & Secrets
- No new secrets. Reuse feature.shoppingLists.enabled.
- No external providers introduced.
+- [ ] No config changes required. Endpoint is authenticated by default based on SecurityConfiguration.anyRequest().authenticated().
+
 2.4 Data & Migrations
- No changes beyond Story 1.
+- [ ] No schema changes. Operation clears items array and updates updatedAt.
+
 2.5 Feature Flags / Kill Switch
- Same as Story 1; CartController endpoints guarded by feature flag.
+- [ ] Not needed. This is a simple additive operation.
+
 2.6 Observability
- Logs:
-INFO: save-for-later, stash start/end, counts.
-DEBUG: productIds impacted.
- Optional metrics:
-cart.save_for_later.count
-cart.stash.count
+- [ ] Logs
+  - Info: "Clearing cart for user {}"
+  - Debug: "Cleared cart {} for user {}"
+- [ ] Metrics – optional
+  - counter: cart.clear.operations
+
 2.7 Performance & Resilience
- Moves operate per-item; for large carts (100+ items), stash loops; acceptable with single Mongo write at the end for cart and N list updates.
+- [ ] Single document update. O(1) write. Idempotent behavior ensured.
+
 2.8 Security & Compliance
- Auth: existing filter chain.
- Ownership: userId param; operations constrained to current user's cart and lists.
-Testing Plan
-Unit tests
-Class: CartServiceSaveForLaterTest
-saveItemForLater_movesItemAndIncrementsWhenExists [AC1, AC4]
-stashCart_all_movesAllAndClearsFromCart [AC2]
-Integration tests
-CartControllerIT
-POST /api/cart/items/{P}/save-for-later moves item and returns updated cart/list [AC1]
-POST /api/cart/stash with all=true moves all [AC2]
-POST /api/lists/{savedListId}/move-to-cart moves back respecting availability [AC3; overlap with Story 1 AC8]
-403 on foreign listId [AC6]
-Negative cases
-Move back unavailable product [AC5] -> failedItems reason out-of-stock.
-Manual Verification Checklist
-Save-for-later single:
-curl -X POST "http://localhost:8080/api/cart/items/{productId}/save-for-later?userId=U1"
-Stash all:
-curl -X POST "http://localhost:8080/api/cart/stash?userId=U1" -H "Content-Type: application/json" -d '{"all":true,"listName":"Holiday gifts"}'
-Move back to cart:
-curl -X POST "http://localhost:8080/api/lists/{listId}/move-to-cart?userId=U1" -d '{"items":[{"productId":"...","quantity":1}]}'
-CI/CD & DevOps
- Ensure tests pass in CI. No pipeline modifications required.
-Rollback & Recovery
- Disable feature via flag if issues arise.
-Risks & Mitigations
-Duplicate item handling in list: consolidate quantities — implemented.
-Partial failures: responded per-item with reasons.
-Pull Request Plan
-PR title: feat(cart): save-for-later and stash cart into shopping lists
-Description: endpoints, DTOs, guard via feature flag, tests.
-Commit Strategy
-feat(dto): add SaveForLaterResponse and CartStashRequest
-feat(service): implement CartService saveItemForLater and stashCart
-feat(controller): add CartController endpoints for save-for-later and stash
-test: add service and controller tests
-Documentation Updates
-README: Document new endpoints with examples.
-CHANGELOG: Added save-for-later and stash.
-Definition of Done (checklist)
- AC1–AC6 verified by tests.
- Flag honored.
- Logs present.
- No regressions in existing cart endpoints.
+- [ ] Endpoint requires authentication. Ownership: userId param should refer to the authenticated user (to be enforced via principal in follow-up story). No sensitive data in logs.
+
+3) Testing Plan
+- Unit tests
+  - Class: CartServiceTest
+    - testClearCart_removesItemsAndResetsTotals
+      - GIVEN a cart with items; WHEN clearCart; THEN items=[], totalItems=0, totalPrice=0; updatedAt updated. [AC-1]
+    - testClearCart_idempotent
+      - GIVEN empty/non-existent cart; WHEN clearCart; THEN return empty ACTIVE cart. [AC-2]
+    - testClearCart_preservesMetadata
+      - GIVEN cart id and expiresAt; WHEN clear; THEN id same, status ACTIVE, expiresAt unchanged. [AC-3]
+- Controller tests
+  - CartControllerTest
+    - deleteCart_returns200AndCartResponse
+- Authorization (manual or mock)
+  - Ensure unauthorized access is blocked by security (401/403 as per configuration).
+
+4) Manual Verification Checklist (QA Playbook)
+- Create active cart by adding an item:
+  - POST /api/cart/items?userId=U1 body {"productId": "<PRODUCT_ID>", "quantity": 2"}
+- Clear cart:
+  - curl -X DELETE "http://localhost:8080/api/cart?userId=U1"
+  - Expect 200 and items=[], totalItems=0
+- Idempotency:
+  - Repeat DELETE; expect same 200 with empty cart.
+
+5) CI/CD & DevOps
+- No pipeline updates. Ensure controller tests compile.
+
+6) Rollback & Recovery
+- Rollback deploy previous version. No data migration needed.
+
+7) Risks & Mitigations
+- Risk: Misuse of userId param.
+  - Mitigation: Move to principal in a future story; verify SecurityConfiguration and Jwt filter integrate correctly.
+
+8) Pull Request Plan
+- Title: feat(cart): add DELETE /api/cart to clear active cart
+- Description: Adds CartService.clearCart and controller endpoint. Idempotent. Tests included.
+- Review focus: ensure metadata preserved and idempotency.
+
+9) Commit Strategy
+- Commit 8: feat(cart): add DELETE /api/cart endpoint; tests for clearCart
+
+10) Documentation Updates
+- README: Document DELETE /api/cart endpoint with example.
+- Swagger: Ensure endpoint shows up with description.
+
+11) Definition of Done (checklist)
+- [ ] AC-1 Clear existing cart – verified via unit and controller tests.
+- [ ] AC-2 Idempotent clear on empty cart – unit tests.
+- [ ] AC-3 Metadata preserved – unit test validates id and status.
+- [ ] Security verified – endpoint requires auth.
+
 Diagrams (Mermaid)
-Dependency graph
+
+- Dependency graph
+```mermaid
 graph TD
-  CartController --> CartService
-  CartService --> ShoppingListService
-  ShoppingListService --> ShoppingListRepository
-  ShoppingListService --> ProductRepository
-  CartService --> CartRepository
-  ShoppingListRepository --> Mongo[(MongoDB)]
-  CartRepository --> Mongo
-  ProductRepository --> Mongo
-System overview
-graph LR
-  Client --> API
-  API --> CartCtrl[CartController]
-  API --> ListCtrl[ShoppingListController]
-  CartCtrl --> CartService
-  CartService --> SLService[ShoppingListService]
-  SLService --> SLRepo
-  SLService --> ProdRepo
-  CartService --> CartRepo
-  SLRepo --> Mongo
-  CartRepo --> Mongo
-  ProdRepo --> Mongo
-Sequence: Save for later
-sequenceDiagram
-  participant C as Client
-  participant CC as CartController
-  participant CS as CartService
-  participant SS as ShoppingListService
-  participant CR as CartRepository
-  participant LR as ShoppingListRepository
-  C->>CC: POST /api/cart/items/{productId}/save-for-later
-  CC->>CS: saveItemForLater(userId, productId)
-  CS->>CR: findActiveCartByUserId
-  CR-->>CS: Cart
-  CS->>CS: removeItem(productId)
-  CS->>CR: save(cart)
-  CS->>SS: getOrCreateDefaultSavedForLater(userId)
-  SS->>LR: findActiveByUserIdAndName
-  LR-->>SS: list or empty
-  SS->>LR: save(new list if needed)
-  SS-->>CS: list
-  CS->>SS: addItem(userId, listId, ListItemRequest)
-  SS->>LR: save(list)
-  SS-->>CS: ListResponse
-  CS-->>CC: SaveForLaterResponse
-  CC-->>C: 200 OK
+  CartService --> CartController:::highlight
+  CartRepository --> CartService
+classDef highlight fill:#e0ffe0,stroke:#2a7,stroke-width:2px;
+```
 
-User Story 3: One-click “Clear my cart” with confirmation and safe failure behavior
-Design Outline (with trade-offs)
-Proposed approach
-Add endpoint POST /api/cart/clear with body parameters: requireConfirmation (boolean) and confirmationToken (String). If requireConfirmation=true, enforce token equals CONFIRM_CLEAR (constant).
-Implement CartService.clearCart(userId, requireConfirmation, token) to:
-Load or create active cart.
-If confirm required, validate token.
-cart.clear(); persist; return snapshot.
-Maintain current authentication model; userId param used with assumption noted.
-Alternatives
-DELETE /api/cart: Semantically nice, but POST is chosen per story guidance to return body and allow confirmation body.
-Risks
-Accidental clears: mitigated by confirmation flag and token.
-Backward compatibility
-Additive endpoint; existing endpoints unchanged.
-Step-by-Step Implementation Plan 2.1 Pre-work
- Continue on same branch.
-2.2 Code Changes
-New DTO: shopping-cart/src/main/java/pk/ai/shopping_cart/dto/cart/CartClearRequest.java
-package pk.ai.shopping_cart.dto.cart;
-
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
-
-@Data
-@Builder
-@NoArgsConstructor
-@AllArgsConstructor
-public class CartClearRequest {
-    private boolean requireConfirmation;
-    private String confirmationToken; // expected "CONFIRM_CLEAR" if requireConfirmation is true
-}
-Modify file: shopping-cart/src/main/java/pk/ai/shopping_cart/service/CartService.java
-Add clearCart method that uses earlier clearCartInternal.
-Diff:
---- a/shopping-cart/src/main/java/pk/ai/shopping_cart/service/CartService.java
-+++ b/shopping-cart/src/main/java/pk/ai/shopping_cart/service/CartService.java
-@@ -176,3 +176,21 @@ public class CartService {
-     public CartResponse clearCartInternal(String userId) {
-         Cart cart = getOrCreateCart(userId);
-         cart.clear();
-         cart.setUpdatedAt(java.time.LocalDateTime.now());
-         cartRepository.save(cart);
-         return convertToCartResponse(cart);
-     }
-+
-+    /**
-+     * Clear the user's active cart with optional confirmation enforcement.
-+     */
-+    public CartResponse clearCart(String userId, boolean requireConfirmation, String confirmationToken) {
-+        if (requireConfirmation) {
-+            if (!"CONFIRM_CLEAR".equals(confirmationToken)) {
-+                throw new IllegalArgumentException("Invalid confirmation token");
-+            }
-+        }
-+        try {
-+            return clearCartInternal(userId);
-+        } catch (RuntimeException ex) {
-+            log.error("Failed to clear cart for user {}: {}", userId, ex.getMessage());
-+            throw ex;
-+        }
-+    }
-Modify file: shopping-cart/src/main/java/pk/ai/shopping_cart/controller/CartController.java
-Add clear endpoint.
-Diff:
---- a/shopping-cart/src/main/java/pk/ai/shopping_cart/controller/CartController.java
-+++ b/shopping-cart/src/main/java/pk/ai/shopping_cart/controller/CartController.java
-@@ -92,5 +92,23 @@ public class CartController {
-         log.info("Stashing cart items for user {}", userId);
-         return ResponseEntity.ok(cartService.stashCart(userId, request));
-     }
-+
-+    /**
-+     * Clear the active cart with optional confirmation.
-+     */
-+    @PostMapping("/clear")
-+    public ResponseEntity<CartResponse> clearCart(
-+            @RequestParam String userId,
-+            @Valid @RequestBody CartClearRequest request) {
-+        log.info("Clearing cart for user {} (requireConfirmation={})", userId, request.isRequireConfirmation());
-+        CartResponse response = cartService.clearCart(
-+                userId,
-+                request.isRequireConfirmation(),
-+                request.getConfirmationToken());
-+        return ResponseEntity.ok(response);
-+    }
- }
-2.3 Config & Secrets
- No changes required.
-2.4 Data & Migrations
- None.
-2.5 Feature Flags / Kill Switch
- Not required; endpoint is independent of lists. No flag.
-2.6 Observability
- Logs:
-INFO: “Clearing cart for user ...”.
-ERROR: on failure, message.
- Optional metric:
-cart.clear.count (counter, labels: result)
-2.7 Performance & Resilience
- One save operation to Mongo; O(n) in-memory to clear list; acceptable.
-2.8 Security & Compliance
- Authenticated endpoint. Ownership relies on userId param; future work will bind to JWT.
-Testing Plan
-Unit tests
-Class: CartServiceClearTest
-clearCart_withoutConfirmation_clears [AC1]
-clearCart_withConfirmation_validToken_clears [AC2]
-clearCart_withInvalidToken_throws [AC2 negative]
-clearCart_whenCartMissing_returnsEmptyCart [AC3]
-Integration tests
-CartControllerIT
-POST /api/cart/clear returns empty cart; verify totalItems=0, isEmpty=true [AC1, AC3]
-403 scenario [AC4] can’t be fully validated without JWT; document limitation.
-Manual test
-curl -X POST "http://localhost:8080/api/cart/clear?userId=U1" -H "Content-Type: application/json" -d '{"requireConfirmation":false}'
-Manual Verification Checklist
-Clear without confirmation:
-curl -X POST "http://localhost:8080/api/cart/clear?userId=U1" -H "Content-Type: application/json" -d '{"requireConfirmation":false}'
-Expect: cart with items=[], totalItems=0, isEmpty=true.
-Clear with confirmation:
-curl -X POST "http://localhost:8080/api/cart/clear?userId=U1" -H "Content-Type: application/json" -d '{"requireConfirmation":true,"confirmationToken":"CONFIRM_CLEAR"}'
-CI/CD & DevOps
- No pipeline changes.
-Rollback & Recovery
- Endpoint is additive; rollback by redeploy previous version if needed.
-Risks & Mitigations
-Accidental clears: mitigated with confirmation flag.
-Pull Request Plan
-PR title: feat(cart): clear cart endpoint with confirmation
-Description: Endpoint, service method, tests.
-Commit Strategy
-feat(dto): add CartClearRequest
-feat(service): implement CartService.clearCart
-feat(controller): add /api/cart/clear endpoint
-test: add tests for clear cart
-Documentation Updates
-README: Document /api/cart/clear request/response and confirmation token requirement.
-CHANGELOG: Added clear cart endpoint.
-Definition of Done (checklist)
- AC1–AC5 scenarios validated by tests/logs.
- No changes to existing cart endpoints.
-Diagrams (Mermaid)
-Dependency graph
-graph TD
-  CartController --> CartService
-  CartService --> CartRepository
-  CartRepository --> Mongo[(MongoDB)]
-System overview
-graph LR
-  Client --> API
-  API --> CartCtrl[CartController]
-  CartCtrl --> CartService
-  CartService --> CartRepo
-  CartRepo --> Mongo
-Sequence: Clear cart
-sequenceDiagram
-  participant C as Client
-  participant CC as CartController
-  participant CS as CartService
-  participant CR as CartRepository
-  C->>CC: POST /api/cart/clear {requireConfirmation, token}
-  CC->>CS: clearCart(userId, requireConfirmation, token)
-  alt requireConfirmation
-    CS->>CS: validate token == CONFIRM_CLEAR
+- System overview
+```mermaid
+flowchart LR
+  subgraph API Layer
+    CartController:::highlight
   end
-  CS->>CS: getOrCreateCart(userId)
-  CS->>CS: cart.clear()
-  CS->>CR: save(cart)
-  CR-->>CS: updated cart
-  CS-->>CC: CartResponse
-  CC-->>C: 200 OK
-Additional Notes and Review Checklist
-Security
-All new endpoints are authenticated by default (per SecurityConfiguration anyRequest().authenticated()).
-Ownership enforced for lists; for cart we rely on userId param like existing code.
-Error handling
-We throw IllegalArgumentException/NoSuchElementException/AccessDeniedException; consider adding a @ControllerAdvice for consistent 4xx/5xx mapping in future.
-API Docs
-springdoc is enabled; endpoints should appear automatically. Consider adding @Operation annotations later for richer docs.
-Build and Run
-Ensure MongoDB is available locally (docker-compose or local install).
-Use ProductController POST /api/products/sample to seed products for manual testing.
-End of Plan.
+  subgraph Service Layer
+    CartService:::highlight
+  end
+  subgraph Persistence
+    CartRepository
+  end
+  CartController --> CartService --> CartRepository
+classDef highlight fill:#e0ffe0,stroke:#2a7,stroke-width:2px;
+```
+
+- Sequence: Clear cart
+```mermaid
+sequenceDiagram
+  participant C as Client
+  participant Ctrl as CartController
+  participant S as CartService
+  participant R as CartRepository
+
+  C->>Ctrl: DELETE /api/cart?userId=U1
+  Ctrl->>S: clearCart(userId)
+  S->>S: getOrCreateCart(userId)
+  S->>R: save(cart cleared)
+  R-->>S: cart
+  S-->>Ctrl: CartResponse
+  Ctrl-->>C: 200 OK (empty cart)
+```
+
+Notes and Assumptions
+- We follow existing pattern of passing userId as @RequestParam to keep consistent with current code. In a subsequent story, we should extract userId from the authenticated principal (JwtAuthenticationFilter) and enforce ownership server-side.
+- Lists are non-reservations. We only enforce availability at transfer-to-cart time.
+- Price snapshots in lists are for display; actual current prices are applied when transferring to cart.
+
+Commands to run
+- mvn -q clean test
+- mvn spring-boot:run
+- Use curl examples in QA Playbook to verify behavior end-to-end.'
