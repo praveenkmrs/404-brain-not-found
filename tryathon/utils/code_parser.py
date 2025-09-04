@@ -46,7 +46,7 @@ def parse_codebase(codebase_path: str | None):
     if codebase_path:
         if not os.path.isabs(codebase_path):
             codebase_path = os.path.abspath(os.path.join(os.getcwd(), codebase_path))
-        print(f"Parsing codebase at: {codebase_path}")
+        # print(f"Parsing codebase at: {codebase_path}")
         processor = RepoProcessor(codebase_path, config=_repomix_config(codebase_path))
         result = processor.process()
         return result
@@ -56,7 +56,7 @@ def parse_codebase(codebase_path: str | None):
 
 def parse_remote_codebase(repo_url: str | None, branch: str = "main"):
     if repo_url:
-        print(f"Parsing remote codebase at: {repo_url}")
+        # print(f"Parsing remote codebase at: {repo_url}")
         base_config = _repomix_config(repo_url)
 
         # Remote repository configuration   
